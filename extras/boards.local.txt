@@ -1,0 +1,6 @@
+# Copiar a .../Arduino15/packages/esp32/hardware/esp32/<version>/boards.local.txt
+# Agrega al menu "Partition Scheme" de la WT32-SC01 PLUS una opcion de 12 MB para
+# el programa. La tabla real la da partitions.csv de la carpeta del sketch.
+wt32-sc01-plus.menu.PartitionScheme.app12M=12MB APP (partitions.csv del sketch, 16MB flash)
+wt32-sc01-plus.menu.PartitionScheme.app12M.build.partitions=default_8MB
+wt32-sc01-plus.menu.PartitionScheme.app12M.upload.maximum_size=12582912

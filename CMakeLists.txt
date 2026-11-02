@@ -1,0 +1,19 @@
+SET(SOURCES ui_INICIO.c
+    ui_CONEXION_BLUETOOTH.c
+    ui_SELECCION_DE_MODO.c
+    ui_MODO_JUEGO.c
+    ui_MODO_REHABILITACION.c
+    ui_RESUMEN_DE_SESSION.c
+    ui.c
+    ui_comp_hook.c
+    ui_helpers.c
+    ui_events.c
+    ui_img_1_png.c
+    ui_img_2_png.c
+    ui_img_3_png.c
+    ui_img_4_png.c
+    ui_img_5_png.c
+    ui_img_6_png.c
+    fonts/ui_font_Noto_San_Kr.c)
+
+add_library(ui ${SOURCES})

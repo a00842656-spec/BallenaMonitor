@@ -1,0 +1,8 @@
+# WT32-SC01 Plus: 16 MB de flash. El programa (UI + musica en PROGMEM) necesita
+# mas de los 3 MB del esquema por defecto, asi que se le dan 12 MB.
+# Name,   Type, SubType,  Offset,   Size
+nvs,      data, nvs,      0x9000,   0x5000,
+otadata,  data, ota,      0xe000,   0x2000,
+app0,     app,  ota_0,    0x10000,  0xC00000,
+spiffs,   data, spiffs,   0xC10000, 0x3E0000,
+coredump, data, coredump, 0xFF0000, 0x10000,
