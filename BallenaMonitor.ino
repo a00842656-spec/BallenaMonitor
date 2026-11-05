@@ -228,7 +228,12 @@ static const uint16_t screenWidth = 480;
 static const uint16_t screenHeight = 320;
 
 static lv_disp_draw_buf_t draw_buf;
-static lv_color_t buf[screenWidth * 40];
+// Pantalla mas fluida: 2 buffers + DMA. Mientras un pedazo se manda a la pantalla,
+// LVGL ya dibuja el siguiente. false = como antes (1 buffer, sin DMA).
+constexpr bool DISPLAY_DMA = true;
+constexpr uint32_t DRAW_BUF_LINES = 40;
+static lv_color_t *drawBuf1 = NULL;
+static lv_color_t *drawBuf2 = NULL;
 
 // LVGL 디스플레이 플러시 함수
 void my_disp_flush(lv_disp_drv_t *disp_drv, const lv_area_t *area, lv_color_t *color_p)
@@ -236,10 +241,15 @@ void my_disp_flush(lv_disp_drv_t *disp_drv, const lv_area_t *area, lv_color_t *c
     uint32_t w = (area->x2 - area->x1 + 1);
     uint32_t h = (area->y2 - area->y1 + 1);
 
-    tft.startWrite();
-    tft.pushImage(area->x1, area->y1, w, h, (uint16_t *)&color_p->full);
-    tft.endWrite();
-
+    if (DISPLAY_DMA && drawBuf2 != NULL) {
+        // la transaccion queda abierta; pushImageDMA espera a que termine el pedazo anterior
+        if (tft.getStartCount() == 0) tft.startWrite();
+        tft.pushImageDMA(area->x1, area->y1, w, h, (lgfx::rgb565_t *)&color_p->full);
+    } else {
+        tft.startWrite();
+        tft.pushImage(area->x1, area->y1, w, h, (lgfx::rgb565_t *)&color_p->full);
+        tft.endWrite();
+    }
     lv_disp_flush_ready(disp_drv);
 }
 
@@ -536,7 +546,7 @@ static void showToast(const char *msg, uint32_t ms, uint32_t color) {
         lv_obj_set_style_text_color(toastLabel, lv_color_white(), 0);
         lv_obj_set_style_text_font(toastLabel, &lv_font_montserrat_16, 0);
         lv_obj_set_style_text_align(toastLabel, LV_TEXT_ALIGN_CENTER, 0);
-        lv_obj_set_style_bg_opa(toastLabel, 235, 0);
+        lv_obj_set_style_bg_opa(toastLabel, LV_OPA_COVER, 0);
         lv_obj_set_style_pad_all(toastLabel, 10, 0);
         lv_obj_set_style_radius(toastLabel, 12, 0);
         lv_obj_clear_flag(toastLabel, LV_OBJ_FLAG_CLICKABLE);
@@ -685,7 +695,7 @@ static void createPacientePopup() {
     lv_obj_set_size(pacPopup, 300, 220);
     lv_obj_center(pacPopup);
     lv_obj_set_style_bg_color(pacPopup, lv_color_hex(0x06243F), 0);
-    lv_obj_set_style_bg_opa(pacPopup, 245, 0);
+    lv_obj_set_style_bg_opa(pacPopup, LV_OPA_COVER, 0);
     lv_obj_set_style_border_color(pacPopup, lv_color_hex(0x6EC6FF), 0);
     lv_obj_set_style_border_width(pacPopup, 2, 0);
     lv_obj_set_style_radius(pacPopup, 16, 0);
@@ -748,7 +758,7 @@ static void createPacienteLabel() {
         lv_obj_set_style_text_color(pacLabel, lv_color_white(), 0);
         lv_obj_set_style_text_font(pacLabel, &lv_font_montserrat_14, 0);
         lv_obj_set_style_bg_color(pacLabel, lv_color_hex(0x06243F), 0);
-        lv_obj_set_style_bg_opa(pacLabel, 200, 0);
+        lv_obj_set_style_bg_opa(pacLabel, LV_OPA_COVER, 0);
         lv_obj_set_style_radius(pacLabel, 8, 0);
         lv_obj_set_style_pad_ver(pacLabel, 2, 0);
         lv_obj_clear_flag(pacLabel, LV_OBJ_FLAG_CLICKABLE);
@@ -1165,7 +1175,7 @@ static void createConnPanel() {
     lv_obj_set_style_pad_all(connPanel, 8, 0);
     lv_obj_set_style_radius(connPanel, 12, 0);
     lv_obj_set_style_bg_color(connPanel, lv_color_hex(0x06243F), 0);
-    lv_obj_set_style_bg_opa(connPanel, 215, 0);
+    lv_obj_set_style_bg_opa(connPanel, LV_OPA_COVER, 0);
     lv_obj_set_style_border_color(connPanel, lv_color_hex(0x6EC6FF), 0);
     lv_obj_set_style_border_width(connPanel, 1, 0);
     lv_obj_clear_flag(connPanel, LV_OBJ_FLAG_SCROLLABLE);
@@ -1272,7 +1282,19 @@ void setup() {
 
     lv_init();
 
-    lv_disp_draw_buf_init(&draw_buf, buf, NULL, screenWidth * 40);
+    // buffers de dibujo en RAM interna con DMA
+    const size_t bufBytes = screenWidth * DRAW_BUF_LINES * sizeof(lv_color_t);
+    drawBuf1 = (lv_color_t *)heap_caps_malloc(bufBytes, MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL);
+    if (DISPLAY_DMA) drawBuf2 = (lv_color_t *)heap_caps_malloc(bufBytes, MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL);
+    if (drawBuf1 == NULL) {   // no deberia pasar: buffer pequeno de emergencia
+        static lv_color_t fallbackBuf[screenWidth * 10];
+        drawBuf1 = fallbackBuf;
+        lv_disp_draw_buf_init(&draw_buf, drawBuf1, NULL, screenWidth * 10);
+    } else {
+        lv_disp_draw_buf_init(&draw_buf, drawBuf1, drawBuf2, screenWidth * DRAW_BUF_LINES);
+    }
+    Serial.printf("[PANTALLA] buffers: %s, RAM interna libre %u bytes\n", drawBuf2 ? "2 + DMA" : "1",
+                  (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
 
     static lv_disp_drv_t disp_drv;
     lv_disp_drv_init(&disp_drv);

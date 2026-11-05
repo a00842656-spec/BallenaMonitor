@@ -15,7 +15,7 @@ constexpr lv_coord_t PANEL_DEFAULT_Y = 40;
 constexpr lv_coord_t PANEL_W = 300;
 constexpr lv_coord_t PANEL_H = 54;
 constexpr lv_coord_t CHART_H = 100;
-constexpr uint16_t CHART_POINTS = 100;   // 100 puntos x 50 ms = 5 s
+constexpr uint16_t CHART_POINTS = 50;    // 50 puntos x 100 ms = 5 s
 constexpr float BAR_FULL_X_THRESHOLD = 2.5f;  // la barra llena = 2.5 x umbral (umbral al 40 %)
 
 constexpr uint32_t COLOR_IDLE = 0x4FA3D9;
@@ -112,7 +112,7 @@ void emgPanelCreate() {
   lv_obj_set_style_pad_all(panel, 4, 0);
   lv_obj_set_style_radius(panel, 12, 0);
   lv_obj_set_style_bg_color(panel, lv_color_hex(0x06243F), 0);
-  lv_obj_set_style_bg_opa(panel, 215, 0);
+  lv_obj_set_style_bg_opa(panel, LV_OPA_COVER, 0);  // opaco: no redibuja el fondo debajo
   lv_obj_set_style_border_color(panel, lv_color_hex(0x6EC6FF), 0);
   lv_obj_set_style_border_width(panel, 1, 0);
   lv_obj_clear_flag(panel, LV_OBJ_FLAG_SCROLLABLE);
@@ -199,12 +199,22 @@ void emgPanelUpdate(bool visible) {
   float thr = emgThreshold();
   float full = thr * BAR_FULL_X_THRESHOLD;
 
-  int v = (int)(s.rmsMv / full * 1000.0f);
-  lv_bar_set_value(bar, LV_CLAMP(0, v, 1000), LV_ANIM_OFF);
+  // solo redibujar si algo cambio
+  static int lastV = -1;
+  static uint32_t lastCol = 0;
+  int v = LV_CLAMP(0, (int)(s.rmsMv / full * 200.0f), 200) * 5;   // pasos de 0.5 %
   uint32_t col = s.saturated ? COLOR_SAT : s.active ? COLOR_ACTIVE : COLOR_IDLE;
-  lv_obj_set_style_bg_color(bar, lv_color_hex(col), LV_PART_INDICATOR);
+  if (v != lastV) {
+    lastV = v;
+    lv_bar_set_value(bar, v, LV_ANIM_OFF);
+  }
+  if (col != lastCol) {
+    lastCol = col;
+    lv_obj_set_style_bg_color(bar, lv_color_hex(col), LV_PART_INDICATOR);
+  }
 
-  if (chartShown) {
+  static uint8_t chartDiv = 0;
+  if (chartShown && (++chartDiv & 1)) {   // grafica a 10 Hz (la barra sigue a 20 Hz)
     lv_chart_set_range(chart, LV_CHART_AXIS_PRIMARY_Y, 0, (lv_coord_t)LV_MAX(10.0f, full));
     lv_chart_set_series_color(chart, serRms, lv_color_hex(col));
     lv_chart_set_next_value(chart, serRms, (lv_coord_t)LV_MIN(s.rmsMv, full));
@@ -238,5 +248,5 @@ void emgPanelUpdate(bool visible) {
       }
       break;
   }
-  lv_label_set_text(label, buf);
+  if (strcmp(lv_label_get_text(label), buf) != 0) lv_label_set_text(label, buf);
 }

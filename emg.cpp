@@ -246,11 +246,21 @@ EmgSnapshot emgRead() {
 
 float emgThreshold() { return thresholdMv; }
 
+static uint32_t thrSaveAtMs = 0;
+
+static void saveThresholdIfDue() {
+  if (thrSaveAtMs != 0 && (int32_t)(millis() - thrSaveAtMs) >= 0) {
+    thrSaveAtMs = 0;
+    prefs.putFloat("thr2", thresholdMv);
+  }
+}
+
 void emgSetThreshold(float mv) {
   if (mv < 1.0f) mv = 1.0f;
   if (mv > 3000.0f) mv = 3000.0f;
   thresholdMv = mv;
-  prefs.putFloat("thr2", mv);
+  thrSaveAtMs = millis() + 2000;   // guardar 2 s despues del ultimo cambio (no en cada toque de +/-)
+  if (thrSaveAtMs == 0) thrSaveAtMs = 1;
 }
 
 float emgTakePeakMv() {
@@ -354,6 +364,7 @@ float emgMvcMv() { return savedMvcMv; }
 static bool plotOn = false;
 
 void emgSerialUpdate() {
+  saveThresholdIfDue();
   // Comandos por el Serial Monitor
   while (Serial.available()) {
     char c = Serial.read();
