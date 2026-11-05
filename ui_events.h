@@ -17,6 +17,9 @@ void TargetUP(lv_event_t * e);
 void TargetDOWN(lv_event_t * e);
 void PauseSession(lv_event_t * e);
 void ContinueSession(lv_event_t * e);
+void GrabarSession(lv_event_t * e);
+void EnviarSession(lv_event_t * e);
+void ContarPaciente(lv_event_t * e);
 void RepetirSession(lv_event_t * e);
 
 #ifdef __cplusplus

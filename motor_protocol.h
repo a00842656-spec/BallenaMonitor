@@ -36,3 +36,16 @@ constexpr uint32_t MOTOR_FAILSAFE_MS = 300;
 
 // Cada cuanto debe reenviar el control mientras un boton esta presionado
 constexpr uint32_t MOTOR_RESEND_MS = 100;
+
+
+// ---- Telemetria: tortuga -> pantalla (bateria) -------------------------------
+// La tortuga lo manda cada TELEMETRY_PERIOD_MS por broadcast (FF:FF:FF:FF:FF:FF),
+// asi no necesita conocer la MAC de la pantalla.
+constexpr uint8_t TELEMETRY_MSG_MAGIC = 0x7B;
+constexpr uint32_t TELEMETRY_PERIOD_MS = 1000;
+
+struct __attribute__((packed)) TelemetryMsg {
+ uint8_t magic;        // siempre TELEMETRY_MSG_MAGIC
+ uint16_t battery_mv;  // voltaje de la bateria (mV), ya corregido por el divisor
+ uint8_t battery_pct;  // 0..100
+};

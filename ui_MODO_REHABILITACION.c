@@ -22,6 +22,9 @@ lv_obj_t * ui_lblProgressPERCENT = NULL;
 lv_obj_t * ui_PAUSAR = NULL;
 lv_obj_t * ui_CONTINUAR = NULL;
 lv_obj_t * ui_TERMINAR5 = NULL;
+lv_obj_t * ui_GRABAR = NULL;
+lv_obj_t * ui_ENVIAR = NULL;
+lv_obj_t * ui_PACIENTE = NULL;
 // event funtions
 void ui_event_HOME5(lv_event_t * e)
 {
@@ -92,6 +95,33 @@ void ui_event_TERMINAR5(lv_event_t * e)
 
     if(event_code == LV_EVENT_CLICKED) {
         _ui_screen_change(&ui_RESUMEN_DE_SESSION, LV_SCR_LOAD_ANIM_FADE_ON, 300, 0, &ui_RESUMEN_DE_SESSION_screen_init);
+    }
+}
+
+void ui_event_GRABAR(lv_event_t * e)
+{
+    lv_event_code_t event_code = lv_event_get_code(e);
+
+    if(event_code == LV_EVENT_CLICKED) {
+        GrabarSession(e);
+    }
+}
+
+void ui_event_ENVIAR(lv_event_t * e)
+{
+    lv_event_code_t event_code = lv_event_get_code(e);
+
+    if(event_code == LV_EVENT_CLICKED) {
+        EnviarSession(e);
+    }
+}
+
+void ui_event_PACIENTE(lv_event_t * e)
+{
+    lv_event_code_t event_code = lv_event_get_code(e);
+
+    if(event_code == LV_EVENT_CLICKED) {
+        ContarPaciente(e);
     }
 }
 
@@ -306,6 +336,39 @@ void ui_MODO_REHABILITACION_screen_init(void)
     lv_obj_set_style_bg_color(ui_TERMINAR5, lv_color_hex(0xFFFFFF), (lv_style_selector_t)LV_PART_MAIN | LV_STATE_DEFAULT);
     lv_obj_set_style_bg_opa(ui_TERMINAR5, 0, (lv_style_selector_t)LV_PART_MAIN | LV_STATE_DEFAULT);
 
+    ui_GRABAR = lv_btn_create(ui_MODO_REHABILITACION);
+    lv_obj_set_width(ui_GRABAR, 70);
+    lv_obj_set_height(ui_GRABAR, 21);
+    lv_obj_set_x(ui_GRABAR, 187);
+    lv_obj_set_y(ui_GRABAR, 40);
+    lv_obj_set_align(ui_GRABAR, LV_ALIGN_CENTER);
+    lv_obj_add_flag(ui_GRABAR, LV_OBJ_FLAG_SCROLL_ON_FOCUS);     /// Flags
+    lv_obj_clear_flag(ui_GRABAR, LV_OBJ_FLAG_SCROLLABLE);      /// Flags
+    lv_obj_set_style_bg_color(ui_GRABAR, lv_color_hex(0xFFFFFF), (lv_style_selector_t)LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_set_style_bg_opa(ui_GRABAR, 0, (lv_style_selector_t)LV_PART_MAIN | LV_STATE_DEFAULT);
+
+    ui_ENVIAR = lv_btn_create(ui_MODO_REHABILITACION);
+    lv_obj_set_width(ui_ENVIAR, 70);
+    lv_obj_set_height(ui_ENVIAR, 21);
+    lv_obj_set_x(ui_ENVIAR, 187);
+    lv_obj_set_y(ui_ENVIAR, 69);
+    lv_obj_set_align(ui_ENVIAR, LV_ALIGN_CENTER);
+    lv_obj_add_flag(ui_ENVIAR, LV_OBJ_FLAG_SCROLL_ON_FOCUS);     /// Flags
+    lv_obj_clear_flag(ui_ENVIAR, LV_OBJ_FLAG_SCROLLABLE);      /// Flags
+    lv_obj_set_style_bg_color(ui_ENVIAR, lv_color_hex(0xFFFFFF), (lv_style_selector_t)LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_set_style_bg_opa(ui_ENVIAR, 0, (lv_style_selector_t)LV_PART_MAIN | LV_STATE_DEFAULT);
+
+    ui_PACIENTE = lv_btn_create(ui_MODO_REHABILITACION);
+    lv_obj_set_width(ui_PACIENTE, 36);
+    lv_obj_set_height(ui_PACIENTE, 21);
+    lv_obj_set_x(ui_PACIENTE, 203);
+    lv_obj_set_y(ui_PACIENTE, 10);
+    lv_obj_set_align(ui_PACIENTE, LV_ALIGN_CENTER);
+    lv_obj_add_flag(ui_PACIENTE, LV_OBJ_FLAG_SCROLL_ON_FOCUS);     /// Flags
+    lv_obj_clear_flag(ui_PACIENTE, LV_OBJ_FLAG_SCROLLABLE);      /// Flags
+    lv_obj_set_style_bg_color(ui_PACIENTE, lv_color_hex(0xFFFFFF), (lv_style_selector_t)LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_set_style_bg_opa(ui_PACIENTE, 0, (lv_style_selector_t)LV_PART_MAIN | LV_STATE_DEFAULT);
+
     lv_obj_add_event_cb(ui_HOME5, ui_event_HOME5, LV_EVENT_ALL, NULL);
     lv_obj_add_event_cb(ui_BLUETOOTH5, ui_event_BLUETOOTH5, LV_EVENT_ALL, NULL);
     lv_obj_add_event_cb(ui_BACK5, ui_event_BACK5, LV_EVENT_ALL, NULL);
@@ -314,6 +377,9 @@ void ui_MODO_REHABILITACION_screen_init(void)
     lv_obj_add_event_cb(ui_PAUSAR, ui_event_PAUSAR, LV_EVENT_ALL, NULL);
     lv_obj_add_event_cb(ui_CONTINUAR, ui_event_CONTINUAR, LV_EVENT_ALL, NULL);
     lv_obj_add_event_cb(ui_TERMINAR5, ui_event_TERMINAR5, LV_EVENT_ALL, NULL);
+    lv_obj_add_event_cb(ui_GRABAR, ui_event_GRABAR, LV_EVENT_ALL, NULL);
+    lv_obj_add_event_cb(ui_ENVIAR, ui_event_ENVIAR, LV_EVENT_ALL, NULL);
+    lv_obj_add_event_cb(ui_PACIENTE, ui_event_PACIENTE, LV_EVENT_ALL, NULL);
 
 }
 
@@ -339,5 +405,8 @@ void ui_MODO_REHABILITACION_screen_destroy(void)
     ui_PAUSAR = NULL;
     ui_CONTINUAR = NULL;
     ui_TERMINAR5 = NULL;
+    ui_GRABAR = NULL;
+    ui_ENVIAR = NULL;
+    ui_PACIENTE = NULL;
 
 }

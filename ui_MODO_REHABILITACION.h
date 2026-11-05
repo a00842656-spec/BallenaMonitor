@@ -38,6 +38,12 @@ extern void ui_event_CONTINUAR(lv_event_t * e);
 extern lv_obj_t * ui_CONTINUAR;
 extern void ui_event_TERMINAR5(lv_event_t * e);
 extern lv_obj_t * ui_TERMINAR5;
+extern void ui_event_GRABAR(lv_event_t * e);
+extern lv_obj_t * ui_GRABAR;
+extern void ui_event_ENVIAR(lv_event_t * e);
+extern lv_obj_t * ui_ENVIAR;
+extern void ui_event_PACIENTE(lv_event_t * e);
+extern lv_obj_t * ui_PACIENTE;
 // CUSTOM VARIABLES
 
 #ifdef __cplusplus
