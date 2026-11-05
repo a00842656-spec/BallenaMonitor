@@ -260,6 +260,36 @@ bool sessionLogBuildJson(String &out, bool includeEnvelope) {
 
 bool sessionLogReady() { return ready; }
 
+bool sessionLogSummary(SessionSummary &o, int *onda, uint32_t maxOnda) {
+  if (!ready) return false;
+  float meanPeak = 0;
+  uint32_t nEmg = 0;
+  for (uint32_t i = 0; i < repN; i++) {
+    if (reps[i].manual) continue;
+    meanPeak += reps[i].peakMv;
+    nEmg++;
+  }
+  if (nEmg) meanPeak /= nEmg;
+  o.durMs = sentDurMs;
+  o.objetivo = sentObjetivo;
+  o.repeticiones = sentReps;
+  o.repsEmg = nEmg;
+  o.completada = sentCompleted;
+  o.umbralMv = sentThreshold;
+  o.picoMedioUv = meanPeak * 1000.0f / EMG_TOTAL_GAIN;
+  o.pctMvc = (sentMvc > 0 && nEmg) ? 100.0f * meanPeak / sentMvc : -1;
+  // onda: igual que lecturasEMG del codigo del equipo (int mV, cada 100 ms, max 400)
+  uint32_t step = APP_SAMPLE_INTERVAL_MS / ENV_PERIOD_MS;
+  uint32_t avail = envN / step;
+  uint32_t lim = maxOnda < APP_MAX_MUESTRAS ? maxOnda : APP_MAX_MUESTRAS;
+  uint32_t n = avail < lim ? avail : lim;
+  float stride = n ? (float)avail / n : 1;
+  for (uint32_t i = 0; i < n; i++) onda[i] = (int)lroundf(env[(uint32_t)(i * stride) * step] / 10.0f);
+  o.nOnda = n;
+  o.intervaloMs = (uint32_t)(APP_SAMPLE_INTERVAL_MS * stride);
+  return true;
+}
+
 static void handleCsv() {
   cors();
   if (!ready) {

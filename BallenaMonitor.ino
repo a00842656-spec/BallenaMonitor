@@ -11,7 +11,12 @@
 #include "emg.h"             // adquisicion sEMG + deteccion de activacion
 #include "emg_panel.h"       // barra / grafica EMG en pantalla
 #include "session_log.h"     // GRABAR / ENVIAR (datos de la sesion)
-#include "ble_app.h"         // Bluetooth con la aplicacion (envio de la sesion)
+#include "ble_app.h"         // (opcional) Bluetooth con la aplicacion
+#include "firestore_upload.h" // ENVIAR -> Firestore (la base de datos de la app)
+
+// La app (FlutterFlow) lee Firestore: ENVIAR sube la sesion por el hotspot (firestore_upload.h).
+// true = ademas anunciar Bluetooth (ble_app.h). No hace falta para la app actual.
+constexpr bool USAR_BLUETOOTH_APP = false;
 #include <Preferences.h>
 bool isGamePaused = false;
 
@@ -753,6 +758,9 @@ static void createPacienteLabel() {
 }
 // ==========================================
 
+static uint32_t grabarMillis = 0;
+static uint32_t lastFsResult = 0;
+
 void GrabarSession(lv_event_t * e) {
     // 버튼 위젯을 기억 (SquareLine 위젯 이름을 몰라도 동작하도록)
     if (grabarBtn == NULL && e != NULL) {
@@ -765,33 +773,48 @@ void GrabarSession(lv_event_t * e) {
     }
     sessionLogStart(objetivoVal, pacienteID.c_str());
     if (isGamePaused) sessionLogPause(true);
-    bleAppSendEstado();   // la app ve "grabando": true
+    grabarMillis = millis();   // "fecha" en Firestore = este momento
+    if (USAR_BLUETOOTH_APP) bleAppSendEstado();
     char b[80];
-    if (sessionLogClockValid()) {
-        snprintf(b, sizeof(b), "Grabando: %s", pacienteID.c_str());
-    } else {
-        // 앱이 아직 /sync 로 시간을 안 보냄 → 날짜/시간 없이 저장 (앱이 받을 때 채울 수 있음)
-        snprintf(b, sizeof(b), "Grabando: %s\n(sin fecha/hora: conectar la app)", pacienteID.c_str());
-    }
+    snprintf(b, sizeof(b), "Grabando: %s", pacienteID.c_str());
     showToast(b, 2000, 0xC81E1E);
 }
 
 void EnviarSession(lv_event_t * e) {
+    if (firestoreBusy()) {
+        showToast("Enviando...\nespera un momento", 2000, 0x1E5AA8);
+        return;
+    }
     if (!sessionLogRecording()) {
+        // El envio anterior fallo (sin hotspot, etc.): reintentar
+        if (firestoreHasUnsent() && firestoreRetry()) {
+            showToast(LV_SYMBOL_REFRESH " Reintentando envio...", 15000, 0x1E5AA8);
+            return;
+        }
         showToast("No hay datos.\nPrimero presiona GRABAR", 2500, 0x8C5A1E);
         return;
     }
     // 이 환자의 다음 세션 번호 (PAC-101 #1, #2, ...)
     int nSes = pacienteNum >= PACIENTE_MIN ? pacienteNextSession(pacienteNum) : 0;
     sessionLogSend(objetivoVal, progresoVal, sessionCompleted, nSes);
+    if (USAR_BLUETOOTH_APP) bleAppSendSession();
     char b[110];
-    if (bleAppSendSession()) {
-        snprintf(b, sizeof(b), LV_SYMBOL_BLUETOOTH " Enviado: %s #%d", pacienteID.c_str(), nSes);
-        showToast(b, 3000, 0x1F8A3A);
+    if (firestoreStartUpload(pacienteID.c_str(), nSes, grabarMillis)) {
+        // el resultado (OK / error) aparece solo cuando termina (ver loop)
+        snprintf(b, sizeof(b), LV_SYMBOL_UPLOAD " Enviando %s #%d\na la app...", pacienteID.c_str(), nSes);
+        showToast(b, 15000, 0x1E5AA8);
     } else {
-        snprintf(b, sizeof(b), LV_SYMBOL_BLUETOOTH " Guardado: %s #%d\nSe envia al conectar la app", pacienteID.c_str(), nSes);
-        showToast(b, 3500, 0x8C5A1E);
+        showToast(LV_SYMBOL_WARNING " No se pudo enviar", 2500, 0xC81E1E);
     }
+}
+
+// Muestra el resultado del envio a Firestore cuando termina (lo llama loop)
+static void firestoreResultUpdate() {
+    uint32_t id = firestoreResultId();
+    if (id == lastFsResult) return;
+    lastFsResult = id;
+    FirestoreState st = firestoreState();
+    showToast(firestoreMessage(), st == FS_OK ? 2500 : 4000, st == FS_OK ? 0x1F8A3A : 0xC81E1E);
 }
 // ==========================================
 
@@ -1173,8 +1196,19 @@ static void updateConnPanel() {
         lv_label_set_text(connLblEmg, "#FF6B6B " LV_SYMBOL_CLOSE "# EMG: revisar cables");
     }
     // La app no es obligatoria para jugar (solo para ENVIAR), por eso no entra en "Todo listo"
-    lv_label_set_text(connLblApp, bleAppConnected() ? "#3CCB5A " LV_SYMBOL_BLUETOOTH "# App: conectada"
-                                                    : "#FFE81A " LV_SYMBOL_BLUETOOTH "# App: esperando...");
+    if (USAR_BLUETOOTH_APP) {
+        lv_label_set_text(connLblApp, bleAppConnected() ? "#3CCB5A " LV_SYMBOL_BLUETOOTH "# App: conectada"
+                                                        : "#FFE81A " LV_SYMBOL_BLUETOOTH "# App: esperando...");
+    } else if (firestoreBusy()) {
+        lv_label_set_text(connLblApp, "#6EC6FF " LV_SYMBOL_WIFI "# App: conectando...");
+    } else if (firestoreHasUnsent()) {
+        lv_label_set_text(connLblApp, "#FFE81A " LV_SYMBOL_WIFI "# App: envio pendiente");
+    } else if (firestoreState() == FS_OK) {
+        lv_label_set_text(connLblApp, "#3CCB5A " LV_SYMBOL_WIFI "# App: ultimo envio OK");
+    } else {
+        lv_label_set_text(connLblApp, sessionLogClockValid() ? "#3CCB5A " LV_SYMBOL_WIFI "# App: hora OK (hotspot)"
+                                                             : "#FFE81A " LV_SYMBOL_WIFI "# App: se conecta al ENVIAR");
+    }
     lv_label_set_text(connLblMsg, (t && m) ? "#3CCB5A Todo listo#" : "#FFE81A Revisa lo marcado en rojo#");
 }
 
@@ -1223,8 +1257,9 @@ void setup() {
     emgBegin();
     Serial.printf("[PANTALLA] MAC: %s  canal ESP-NOW %u\n", WiFi.macAddress().c_str(), ESPNOW_CHANNEL);
 
-    // Bluetooth con la app (GRABAR / ENVIAR)
-    bleAppBegin();
+    // App: ENVIAR -> Firestore por el hotspot (y toma la hora al encender)
+    firestoreBegin();
+    if (USAR_BLUETOOTH_APP) bleAppBegin();
 
     // 백라이트 핀 켜기 (GPIO 45)
     pinMode(45, OUTPUT);
@@ -1317,7 +1352,8 @@ void loop() {
     emgPanelUpdate(scr == ui_MODO_JUEGO || scr == ui_MODO_REHABILITACION);
     emgSerialUpdate();
     sessionLogLoop();
-    bleAppLoop();           // Bluetooth: comandos de la app + envio por pedazos       // GRABAR 중 데이터 저장 + Wi-Fi 요청 처리
+    if (USAR_BLUETOOTH_APP) bleAppLoop();
+    firestoreResultUpdate();   // aviso "Enviado a la app" / error
     updateGrabarButton();
     updateConnPanel();
 

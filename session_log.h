@@ -29,7 +29,7 @@
 
 // true  = ademas la pantalla crea la red Wi-Fi "Ballena-EMG" (http://192.168.4.1), plan B.
 // false = solo Bluetooth (ble_app.h). Menos interferencia con ESP-NOW (tortuga y EMG).
-constexpr bool SESSION_WIFI_AP = false;
+constexpr bool SESSION_WIFI_AP = false;   // NO usar junto con Firestore
 
 void sessionLogBegin();   // en setup(), despues de esp_now_init()
 void sessionLogLoop();    // en loop()
@@ -50,7 +50,19 @@ uint32_t sessionLogId();
 const char *sessionLogApSsid();
 
 // ---- Para Bluetooth (ble_app.cpp) y Wi-Fi ----------------------------------------
-bool sessionLogReady();   // hay una sesion enviada (ENVIAR) para descargar
+bool sessionLogReady();
+
+// Resumen de la ultima sesion enviada (para subirla a Firestore)
+struct SessionSummary {
+  uint32_t durMs;
+  int objetivo, repeticiones, repsEmg;
+  bool completada;
+  float umbralMv, picoMedioUv;
+  float pctMvc;            // -1 = sin calibrar
+  uint32_t nOnda;          // muestras en "onda" (max 400)
+  uint32_t intervaloMs;    // 100 ms (mas si la sesion dura > 40 s)
+};
+bool sessionLogSummary(SessionSummary &out, int *onda, uint32_t maxOnda);   // hay una sesion enviada (ENVIAR) para descargar
 // JSON completo de la ultima sesion. includeEnvelope=false: sin "envolvente_mV"
 // (para Bluetooth; "lecturasEMG" con 400 muestras si va incluido)
 bool sessionLogBuildJson(String &out, bool includeEnvelope);
