@@ -11,7 +11,7 @@
 #include "session_log.h"
 #include <lvgl.h>
 
-constexpr uint32_t WIFI_TIMEOUT_UPLOAD_MS = 15000;
+constexpr uint32_t WIFI_TIMEOUT_UPLOAD_MS = 12000;
 constexpr uint32_t WIFI_TIMEOUT_BOOT_MS = 8000;
 constexpr uint32_t NTP_TIMEOUT_MS = 6000;
 constexpr int TZ_MIN_MEXICO = -360;   // UTC-6 (fecha/hora local en la pantalla)
@@ -21,7 +21,7 @@ enum Job : uint8_t { JOB_CLOCK, JOB_UPLOAD };
 static volatile FirestoreState state = FS_IDLE;
 static volatile bool busy = false;
 static volatile uint32_t resultId = 0;
-static char message[96] = "";
+static char message[160] = "";
 static String payload;            // JSON listo, con "%FECHA%" en lugar de la fecha
 static uint32_t payloadGrabarMs = 0;
 static bool unsent = false;
@@ -31,14 +31,60 @@ static void setMsg(const char *m) {
   message[sizeof(message) - 1] = 0;
 }
 
-static bool wifiConnect(uint32_t timeoutMs) {
-  WiFi.begin(FIRESTORE_WIFI_SSID, FIRESTORE_WIFI_PASS);
+static char ssidUsed[33] = FIRESTORE_WIFI_SSID;
+static char failReason[64] = "";
+
+static bool tryConnect(const char *ssid, uint32_t timeoutMs) {
+  WiFi.begin(ssid, FIRESTORE_WIFI_PASS);
   uint32_t t0 = millis();
   while (WiFi.status() != WL_CONNECTED) {
-    if (millis() - t0 > timeoutMs) return false;
+    if (millis() - t0 > timeoutMs) {
+      WiFi.disconnect(false, false);
+      return false;
+    }
     vTaskDelay(pdMS_TO_TICKS(100));
   }
   return true;
+}
+
+static String trimLower(const char *x) {
+  String t(x);
+  t.trim();
+  t.toLowerCase();
+  return t;
+}
+
+// Conecta al hotspot. Si falla, busca las redes y explica por que (Serial + pantalla).
+// Si existe una red con el mismo nombre pero con otros espacios/mayusculas, usa esa.
+static bool wifiConnect(uint32_t timeoutMs) {
+  failReason[0] = 0;
+  if (tryConnect(ssidUsed, timeoutMs)) return true;
+
+  Serial.printf("[NUBE] No conecto a '%s' (estado %d). Buscando redes...\n", ssidUsed, (int)WiFi.status());
+  int n = WiFi.scanNetworks(false, true);
+  String want = trimLower(FIRESTORE_WIFI_SSID);
+  int found = -1;
+  for (int i = 0; i < n; i++) {
+    Serial.printf("[NUBE]   red '%s'  canal %d  senal %d dBm\n", WiFi.SSID(i).c_str(), (int)WiFi.channel(i),
+                  (int)WiFi.RSSI(i));
+    if (found < 0 && trimLower(WiFi.SSID(i).c_str()) == want) found = i;
+  }
+  if (found < 0) {
+    snprintf(failReason, sizeof(failReason), "No se ve la red '%s'", FIRESTORE_WIFI_SSID);
+    Serial.println("[NUBE] La red no aparece: hotspot apagado, en 5 GHz, o nombre distinto");
+    WiFi.scanDelete();
+    return false;
+  }
+  String exact = WiFi.SSID(found);
+  WiFi.scanDelete();
+  if (exact != ssidUsed) {
+    Serial.printf("[NUBE] El nombre real es '%s': reintentando con ese\n", exact.c_str());
+    strncpy(ssidUsed, exact.c_str(), sizeof(ssidUsed) - 1);
+    if (tryConnect(ssidUsed, timeoutMs)) return true;
+  }
+  snprintf(failReason, sizeof(failReason), "Red '%s' visible:\nrevisar contrasena", ssidUsed);
+  Serial.println("[NUBE] La red existe pero no acepta la conexion: contrasena incorrecta?");
+  return false;
 }
 
 // Regresa al canal de ESP-NOW para que la tortuga y el ESP32 EMG vuelvan a funcionar
@@ -82,7 +128,10 @@ static void task(void *arg) {
   if (!wifiConnect(WIFI_TIMEOUT_UPLOAD_MS)) {
     wifiRelease();
     unsent = true;
-    setMsg(LV_SYMBOL_WARNING " Sin Wi-Fi (hotspot)\nENVIAR otra vez = reintentar");
+    char b[160];
+    snprintf(b, sizeof(b), LV_SYMBOL_WARNING " Sin Wi-Fi: %s\nENVIAR otra vez = reintentar",
+             failReason[0] ? failReason : "hotspot");
+    setMsg(b);
     Serial.println("[NUBE] ERROR: no se pudo conectar al hotspot");
     state = FS_FAIL;
     resultId = resultId + 1;
