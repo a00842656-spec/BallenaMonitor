@@ -231,7 +231,7 @@ static lv_disp_draw_buf_t draw_buf;
 // Pantalla mas fluida: 2 buffers + DMA. Mientras un pedazo se manda a la pantalla,
 // LVGL ya dibuja el siguiente. false = como antes (1 buffer, sin DMA).
 constexpr bool DISPLAY_DMA = true;
-constexpr uint32_t DRAW_BUF_LINES = 40;
+constexpr uint32_t DRAW_BUF_LINES = 20;   // 2 x 20 lineas = la misma RAM que antes (1 x 40): HTTPS necesita RAM interna
 static lv_color_t *drawBuf1 = NULL;
 static lv_color_t *drawBuf2 = NULL;
 

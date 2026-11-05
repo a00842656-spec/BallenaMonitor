@@ -4,6 +4,9 @@
 #include <HTTPClient.h>
 #include <WiFi.h>
 #include <WiFiClientSecure.h>
+#include <esp_heap_caps.h>
+#include <lwip/dns.h>
+#include <lwip/tcpip.h>
 #include <esp_wifi.h>
 #include <time.h>
 
@@ -12,6 +15,8 @@
 #include <lvgl.h>
 
 constexpr uint32_t WIFI_TIMEOUT_UPLOAD_MS = 12000;
+constexpr bool FECHA_LOCAL_CON_Z = true;
+#define FIRESTORE_HOST "firestore.googleapis.com"
 constexpr uint32_t WIFI_TIMEOUT_BOOT_MS = 8000;
 constexpr uint32_t NTP_TIMEOUT_MS = 6000;
 constexpr int TZ_MIN_MEXICO = -360;   // UTC-6 (fecha/hora local en la pantalla)
@@ -106,6 +111,49 @@ static bool ntpSync() {
   return true;
 }
 
+// ---- DNS dentro del hilo de red (lwIP) ------------------------------------------
+// Network.hostByName() del core 3.3.x se cae ("Required to lock TCPIP core
+// functionality") cuando se llama desde otra tarea. Por eso la direccion de
+// Firestore se busca aqui, dentro del hilo de lwIP, y se conecta por IP.
+struct DnsReq {
+  const char *host;
+  ip_addr_t addr;
+  SemaphoreHandle_t done;
+  volatile bool ok;
+};
+static DnsReq dnsReq;   // estatico: el callback puede llegar tarde
+
+static void dnsFound(const char *, const ip_addr_t *ip, void *arg) {
+  DnsReq *r = (DnsReq *)arg;
+  if (ip != nullptr) {
+    r->addr = *ip;
+    r->ok = true;
+  }
+  xSemaphoreGive(r->done);
+}
+
+static void dnsStart(void *arg) {
+  DnsReq *r = (DnsReq *)arg;
+  err_t e = dns_gethostbyname_addrtype(r->host, &r->addr, dnsFound, r, LWIP_DNS_ADDRTYPE_IPV4);
+  if (e == ERR_OK) {
+    r->ok = true;
+    xSemaphoreGive(r->done);
+  } else if (e != ERR_INPROGRESS) {
+    xSemaphoreGive(r->done);
+  }
+}
+
+static bool resolveHost(const char *host, IPAddress &out) {
+  if (dnsReq.done == nullptr) dnsReq.done = xSemaphoreCreateBinary();
+  xSemaphoreTake(dnsReq.done, 0);  // limpiar
+  dnsReq.host = host;
+  dnsReq.ok = false;
+  if (tcpip_callback(dnsStart, &dnsReq) != ERR_OK) return false;
+  if (xSemaphoreTake(dnsReq.done, pdMS_TO_TICKS(8000)) != pdTRUE || !dnsReq.ok) return false;
+  out = IPAddress(ip_2_ip4(&dnsReq.addr)->addr);
+  return true;
+}
+
 static void task(void *arg) {
   Job job = (Job)(uintptr_t)arg;
 
@@ -146,7 +194,10 @@ static void task(void *arg) {
     // fecha = momento de GRABAR (ahora - lo que ha pasado desde GRABAR), en UTC
     time_t start = time(nullptr) - (time_t)((millis() - payloadGrabarMs) / 1000);
     struct tm g;
-    gmtime_r(&start, &g);
+    // Igual que el codigo del equipo: hora LOCAL de Mexico escrita con "Z"
+    // (asi la app la muestra con la hora correcta). false = UTC real.
+    if (FECHA_LOCAL_CON_Z) localtime_r(&start, &g);
+    else gmtime_r(&start, &g);
     char f[32];
     strftime(f, sizeof(f), "%Y-%m-%dT%H:%M:%SZ", &g);
     body.replace("%FECHA%", f);
@@ -154,20 +205,45 @@ static void task(void *arg) {
     body.replace("{\"timestampValue\": \"%FECHA%\"}", "{\"nullValue\": null}");
   }
 
-  WiFiClientSecure client;
-  client.setInsecure();
-  HTTPClient http;
-  http.setTimeout(12000);
-  String url = "https://firestore.googleapis.com/v1/projects/" FIRESTORE_PROJECT_ID
+  // HTTPS necesita ~40 KB de RAM interna libre (mbedTLS). Se intenta hasta 3 veces.
+  String url = "https://" FIRESTORE_HOST "/v1/projects/" FIRESTORE_PROJECT_ID
                "/databases/(default)/documents/" FIRESTORE_COLLECTION;
   int code = -1;
-  if (http.begin(client, url)) {
-    http.addHeader("Content-Type", "application/json");
-    code = http.POST(body);
-    if (code != 200 && code != 201) {
-      Serial.printf("[NUBE] Respuesta: %s\n", http.getString().c_str());
+  for (int intento = 1; intento <= 3 && code != 200 && code != 201; intento++) {
+    Serial.printf("[NUBE] Intento %d: RAM interna libre %u, bloque mayor %u\n", intento,
+                  (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+                  (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL));
+    WiFiClientSecure client;
+    client.setInsecure();
+    client.setTimeout(15);            // segundos
+    client.setHandshakeTimeout(20);   // segundos
+    IPAddress ip;
+    if (!resolveHost(FIRESTORE_HOST, ip)) {
+      Serial.println("[NUBE] DNS: no se encontro firestore.googleapis.com");
+      code = -100;
+    } else if (!client.connect(ip, 443, FIRESTORE_HOST, nullptr, nullptr, nullptr)) {
+      char err[100] = "";
+      client.lastError(err, sizeof(err));
+      Serial.printf("[NUBE] TLS no conecto a %s: %s\n", ip.toString().c_str(), err);
+      code = -101;
+    } else {
+      // HTTPClient reutiliza la conexion ya abierta (no vuelve a buscar el nombre)
+      HTTPClient http;
+      http.setReuse(true);
+      http.setTimeout(15000);
+      if (http.begin(client, url)) {
+        http.addHeader("Content-Type", "application/json");
+        code = http.POST(body);
+        if (code != 200 && code != 201) {
+          Serial.printf("[NUBE] HTTP %d (%s)\n", code, http.errorToString(code).c_str());
+          if (code > 0) Serial.printf("[NUBE] Respuesta: %s\n", http.getString().c_str());
+        }
+        http.end();
+      }
     }
-    http.end();
+    client.stop();
+    if (code > 0 && code != 200 && code != 201) break;   // respuesta del servidor: no sirve reintentar
+    if (code != 200 && code != 201) vTaskDelay(pdMS_TO_TICKS(1500));
   }
   wifiRelease();
 

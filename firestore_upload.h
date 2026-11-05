@@ -15,7 +15,7 @@
 #include <Arduino.h>
 
 // ---- Configuracion (igual que CODIGOFIRESTORE.ino) ------------------------------
-#define FIRESTORE_WIFI_SSID "IPhone"        // OJO: el codigo del equipo tiene un espacio al final
+#define FIRESTORE_WIFI_SSID "IPhone"     // nombre EXACTO del hotspot (mayusculas/espacios se corrigen solos)
 #define FIRESTORE_WIFI_PASS "A00842656"
 #define FIRESTORE_PROJECT_ID "emg-display"
 #define FIRESTORE_COLLECTION "consultas"
