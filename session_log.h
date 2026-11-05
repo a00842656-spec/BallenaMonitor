@@ -27,6 +27,10 @@
 
 #include <Arduino.h>
 
+// true  = ademas la pantalla crea la red Wi-Fi "Ballena-EMG" (http://192.168.4.1), plan B.
+// false = solo Bluetooth (ble_app.h). Menos interferencia con ESP-NOW (tortuga y EMG).
+constexpr bool SESSION_WIFI_AP = false;
+
 void sessionLogBegin();   // en setup(), despues de esp_now_init()
 void sessionLogLoop();    // en loop()
 
@@ -44,3 +48,12 @@ bool sessionLogClockValid();   // true si la app ya mando la hora (/sync)
 uint32_t sessionLogElapsedMs();
 uint32_t sessionLogId();
 const char *sessionLogApSsid();
+
+// ---- Para Bluetooth (ble_app.cpp) y Wi-Fi ----------------------------------------
+bool sessionLogReady();   // hay una sesion enviada (ENVIAR) para descargar
+// JSON completo de la ultima sesion. includeEnvelope=false: sin "envolvente_mV"
+// (para Bluetooth; "lecturasEMG" con 400 muestras si va incluido)
+bool sessionLogBuildJson(String &out, bool includeEnvelope);
+void sessionLogEstadoJson(char *buf, size_t len);
+// La app manda la hora (la pantalla no tiene reloj). out: respuesta JSON
+bool sessionLogSetClock(long long epoch, int tzMin, char *out, size_t outLen);

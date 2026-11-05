@@ -74,15 +74,12 @@ static void cors() {
   server.sendHeader("Cache-Control", "no-store");
 }
 
-static void handleSync() {
-  cors();
-  if (!server.hasArg("epoch")) {
-    server.send(400, "application/json", "{\"error\":\"falta epoch (segundos Unix UTC)\"}");
-    return;
-  }
-  long long epoch = atoll(server.arg("epoch").c_str());
+bool sessionLogSetClock(long long epoch, int tzMin, char *out, size_t outLen) {
   if (epoch > 100000000000LL) epoch /= 1000;  // si mandan milisegundos
-  int tzMin = server.hasArg("tz_min") ? server.arg("tz_min").toInt() : -360;  // Mexico: UTC-6
+  if (epoch < 1600000000LL) {                  // antes de 2020: valor invalido
+    if (out) snprintf(out, outLen, "{\"ok\":false,\"error\":\"epoch invalido\"}");
+    return false;
+  }
   struct timeval tv = {(time_t)epoch, 0};
   settimeofday(&tv, nullptr);
   // POSIX TZ: el signo va al reves ("UTC6" = 6 h detras de UTC)
@@ -96,30 +93,44 @@ static void handleSync() {
   localtime_r(&now, &lt);
   char b[96];
   strftime(b, sizeof(b), "{\"ok\":true,\"hora_local\":\"%Y-%m-%d %H:%M:%S\"}", &lt);
-  server.send(200, "application/json", b);
+  if (out) snprintf(out, outLen, "%s", b);
   Serial.printf("[RELOJ] Sincronizado por la app: %s\n", b);
+  return true;
 }
 
-static void handleEstado() {
+static void handleSync() {
   cors();
-  char b[260];
-  snprintf(b, sizeof(b),
+  if (!server.hasArg("epoch")) {
+    server.send(400, "application/json", "{\"error\":\"falta epoch (segundos Unix UTC)\"}");
+    return;
+  }
+  long long epoch = atoll(server.arg("epoch").c_str());
+  int tzMin = server.hasArg("tz_min") ? server.arg("tz_min").toInt() : -360;  // Mexico: UTC-6
+  char b[96];
+  bool ok = sessionLogSetClock(epoch, tzMin, b, sizeof(b));
+  server.send(ok ? 200 : 400, "application/json", b);
+}
+
+void sessionLogEstadoJson(char *b, size_t n) {
+  snprintf(b, n,
            "{\"grabando\":%s,\"listo\":%s,\"id\":%lu,\"segundos_grabados\":%.1f,"
            "\"pacienteID\":\"%s\",\"hora_sincronizada\":%s}",
            recording ? "true" : "false", ready ? "true" : "false", (unsigned long)sessionId,
            recording ? (millis() - startMs) / 1000.0 : sentDurMs / 1000.0, recPaciente,
            clockValid ? "true" : "false");
+}
+
+static void handleEstado() {
+  cors();
+  char b[260];
+  sessionLogEstadoJson(b, sizeof(b));
   server.send(200, "application/json", b);
 }
 
-static void handleJson() {
-  cors();
-  if (!ready) {
-    server.send(404, "application/json", "{\"error\":\"sin datos: presiona GRABAR y luego ENVIAR\"}");
-    return;
-  }
-  server.setContentLength(CONTENT_LENGTH_UNKNOWN);
-  server.send(200, "application/json", "");
+// Escribe el JSON de la sesion por partes (HTTP o Bluetooth)
+typedef void (*JsonOut)(const char *txt, void *ctx);
+
+static void writeJson(JsonOut out, void *ctx, bool includeEnvelope, const char *prefix) {
   char b[256];
   // Promedios solo de las repeticiones detectadas por EMG (las manuales no tienen senal)
   float meanDur = 0, meanPeak = 0;
@@ -136,46 +147,47 @@ static void handleJson() {
   }
   float logroPct = sentObjetivo > 0 ? 100.0f * sentReps / sentObjetivo : 0;
   if (logroPct > 100) logroPct = 100;
+  if (prefix) out(prefix, ctx);
   snprintf(b, sizeof(b),
            "{\"id\":%lu,\"pacienteID\":\"%s\",\"sesion_paciente\":%d,\"sesionID\":\"%s #%d\","
            "\"fecha\":\"%s\",\"hora\":\"%s\",\"hora_valida\":%s,\"modo\":\"REHABILITACION\",",
            (unsigned long)sessionId, recPaciente, sentSesionPaciente, recPaciente, sentSesionPaciente,
            recFecha, recHora, clockValid && recFecha[0] ? "true" : "false");
-  server.sendContent(b);
+  out(b, ctx);
   snprintf(b, sizeof(b),
            "\"duracion_s\":%.1f,\"objetivo\":%d,\"repeticiones\":%d,\"completada\":%s,\"umbral_mV\":%.1f,",
            sentDurMs / 1000.0, sentObjetivo, sentReps, sentCompleted ? "true" : "false", (double)sentThreshold);
-  server.sendContent(b);
+  out(b, ctx);
   snprintf(b, sizeof(b),
            "\"repeticiones_emg\":%lu,\"repeticiones_manual\":%lu,\"logro_pct\":%.1f,"
            "\"activacion_media_ms\":%.0f,\"pico_medio_mV\":%.1f,\"pico_medio_uV\":%.1f,",
            (unsigned long)nEmg, (unsigned long)(repN - nEmg), (double)logroPct, (double)meanDur,
            (double)meanPeak, (double)(meanPeak * 1000.0f / EMG_TOTAL_GAIN));
-  server.sendContent(b);
+  out(b, ctx);
   if (sentMvc > 0 && nEmg) {
     snprintf(b, sizeof(b), "\"mvc_mV\":%.1f,\"activacion_media_pct_mvc\":%.1f,", (double)sentMvc,
              (double)(100.0f * meanPeak / sentMvc));
   } else {
     snprintf(b, sizeof(b), "\"mvc_mV\":null,\"activacion_media_pct_mvc\":null,");
   }
-  server.sendContent(b);
+  out(b, ctx);
   snprintf(b, sizeof(b), "\"ganancia_total\":%.1f,\"envolvente_hz\":%lu,\"envolvente_truncada\":%s,",
            (double)EMG_TOTAL_GAIN, (unsigned long)(1000 / ENV_PERIOD_MS), envTruncated ? "true" : "false");
-  server.sendContent(b);
+  out(b, ctx);
 
-  server.sendContent("\"repeticiones_detalle\":[");
+  out("\"repeticiones_detalle\":[", ctx);
   for (uint32_t i = 0; i < repN; i++) {
     snprintf(b, sizeof(b),
              "%s{\"n\":%lu,\"fuente\":\"%s\",\"t_s\":%.2f,\"duracion_ms\":%lu,\"pico_mV\":%.1f,\"latencia_ms\":%ld}",
              i ? "," : "", (unsigned long)(i + 1), reps[i].manual ? "MANUAL" : "EMG", reps[i].tMs / 1000.0,
              (unsigned long)reps[i].durMs, (double)reps[i].peakMv, (long)reps[i].latencyMs);
-    server.sendContent(b);
+    out(b, ctx);
   }
-  server.sendContent("],\"pausas\":[");
+  out("],\"pausas\":[", ctx);
   for (uint32_t i = 0; i < pauseN; i++) {
     snprintf(b, sizeof(b), "%s{\"t_s\":%.2f,\"duracion_s\":%.1f}", i ? "," : "", pauses[i].tMs / 1000.0,
              pauses[i].durMs / 1000.0);
-    server.sendContent(b);
+    out(b, ctx);
   }
   // lecturasEMG: mismo formato que el codigo del equipo (int, cada 100 ms, max 400).
   // Si la sesion es mas larga, se reparten 400 muestras en toda la sesion.
@@ -187,7 +199,7 @@ static void handleJson() {
     uint32_t intervalMs = (uint32_t)(APP_SAMPLE_INTERVAL_MS * stride);
     snprintf(b, sizeof(b), "],\"muestrasGrabadas\":%lu,\"SAMPLE_INTERVAL_ms\":%lu,\"lecturasEMG\":[",
              (unsigned long)n, (unsigned long)intervalMs);
-    server.sendContent(b);
+    out(b, ctx);
     String c;
     c.reserve(1100);
     for (uint32_t i = 0; i < n; i++) {
@@ -196,13 +208,17 @@ static void handleJson() {
       snprintf(v, sizeof(v), "%s%d", i ? "," : "", (int)lroundf(env[idx] / 10.0f));
       c += v;
       if (c.length() > 1000) {
-        server.sendContent(c);
+        out(c.c_str(), ctx);
         c = "";
       }
     }
-    server.sendContent(c);
+    out(c.c_str(), ctx);
   }
-  server.sendContent("],\"envolvente_mV\":[");
+  if (!includeEnvelope) {
+    out("]}", ctx);
+    return;
+  }
+  out("],\"envolvente_mV\":[", ctx);
   // en bloques para no gastar memoria
   String chunk;
   chunk.reserve(1100);
@@ -211,14 +227,38 @@ static void handleJson() {
     snprintf(v, sizeof(v), "%s%.1f", i ? "," : "", env[i] / 10.0);
     chunk += v;
     if (chunk.length() > 1000) {
-      server.sendContent(chunk);
+      out(chunk.c_str(), ctx);
       chunk = "";
     }
   }
   chunk += "]}";
-  server.sendContent(chunk);
+  out(chunk.c_str(), ctx);
+  }
+
+static void httpOut(const char *t, void *) { server.sendContent(t); }
+static void stringOut(const char *t, void *ctx) { *(String *)ctx += t; }
+
+static void handleJson() {
+  cors();
+  if (!ready) {
+    server.send(404, "application/json", "{\"error\":\"sin datos: presiona GRABAR y luego ENVIAR\"}");
+    return;
+  }
+  server.setContentLength(CONTENT_LENGTH_UNKNOWN);
+  server.send(200, "application/json", "");
+  writeJson(httpOut, nullptr, true, nullptr);
   server.sendContent("");  // fin
 }
+
+bool sessionLogBuildJson(String &out, bool includeEnvelope) {
+  if (!ready) return false;
+  out = "";
+  out.reserve(includeEnvelope ? 8000 : 3000);
+  writeJson(stringOut, &out, includeEnvelope, nullptr);
+  return true;
+}
+
+bool sessionLogReady() { return ready; }
 
 static void handleCsv() {
   cors();
@@ -270,6 +310,10 @@ void sessionLogBegin() {
   }
   if (env == nullptr) envMax = 0;
 
+  if (!SESSION_WIFI_AP) {
+    Serial.println("[WIFI] Red propia desactivada (SESSION_WIFI_AP = false): la app recibe por Bluetooth");
+    return;
+  }
   // Red propia en el MISMO canal que ESP-NOW (si no, la tortuga deja de recibir)
   WiFi.softAP(WIFI_AP_SSID, WIFI_AP_PASS, ESPNOW_CHANNEL);
   server.on("/", handleRoot);
@@ -283,7 +327,7 @@ void sessionLogBegin() {
 }
 
 void sessionLogLoop() {
-  server.handleClient();
+  if (SESSION_WIFI_AP) server.handleClient();
 
   if (recording && millis() - lastEnvMs >= ENV_PERIOD_MS) {
     lastEnvMs += ENV_PERIOD_MS;
@@ -349,9 +393,8 @@ bool sessionLogSend(int objetivo, int repeticiones, bool completada, int sesionP
   sentSesionPaciente = sesionPaciente;
   sessionId++;
   ready = true;
-  Serial.printf("[ENVIAR] %s #%d (envio %lu): %d/%d reps, %.1f s, %lu puntos -> http://%s/sesion.json\n",
-                recPaciente, sesionPaciente, (unsigned long)sessionId, repeticiones, objetivo, sentDurMs / 1000.0, (unsigned long)envN,
-                WiFi.softAPIP().toString().c_str());
+  Serial.printf("[ENVIAR] %s #%d (envio %lu): %d/%d reps, %.1f s, %lu puntos\n", recPaciente, sesionPaciente,
+                (unsigned long)sessionId, repeticiones, objetivo, sentDurMs / 1000.0, (unsigned long)envN);
   return true;
 }
 

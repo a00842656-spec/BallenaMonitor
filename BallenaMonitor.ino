@@ -10,7 +10,8 @@
 #include "audio.h"           // musica y efectos (conector SPEAKER)
 #include "emg.h"             // adquisicion sEMG + deteccion de activacion
 #include "emg_panel.h"       // barra / grafica EMG en pantalla
-#include "session_log.h"     // GRABAR / ENVIAR (datos de la sesion por Wi-Fi)
+#include "session_log.h"     // GRABAR / ENVIAR (datos de la sesion)
+#include "ble_app.h"         // Bluetooth con la aplicacion (envio de la sesion)
 #include <Preferences.h>
 bool isGamePaused = false;
 
@@ -69,6 +70,15 @@ static volatile uint8_t turtleBatteryPct = 0;
 
 static void onEspNowRecv(const esp_now_recv_info_t *info, const uint8_t *data, int len) {
     if (info == NULL || data == NULL) return;
+    // EMG del ESP32 del circuito analogico (de cualquier MAC)
+    if (len == (int)sizeof(EmgMsg) && data[0] == EMG_MSG_MAGIC) {
+        EmgMsg m;
+        memcpy(&m, data, sizeof(m));
+        emgRemoteCountSeq(m.seq);
+        emgRemoteFeed(m.rms_x10 / 10.0f, m.peak_x10 / 10.0f, (float)m.input_mv, (m.flags & 1) != 0,
+                      (m.flags & 2) != 0);
+        return;
+    }
     if (memcmp(info->src_addr, turtleAddress, 6) != 0 &&
         !(turtleAddress[0] == 0xFF && turtleAddress[1] == 0xFF)) {
         return;  // no es nuestra tortuga
@@ -755,6 +765,7 @@ void GrabarSession(lv_event_t * e) {
     }
     sessionLogStart(objetivoVal, pacienteID.c_str());
     if (isGamePaused) sessionLogPause(true);
+    bleAppSendEstado();   // la app ve "grabando": true
     char b[80];
     if (sessionLogClockValid()) {
         snprintf(b, sizeof(b), "Grabando: %s", pacienteID.c_str());
@@ -773,10 +784,14 @@ void EnviarSession(lv_event_t * e) {
     // 이 환자의 다음 세션 번호 (PAC-101 #1, #2, ...)
     int nSes = pacienteNum >= PACIENTE_MIN ? pacienteNextSession(pacienteNum) : 0;
     sessionLogSend(objetivoVal, progresoVal, sessionCompleted, nSes);
-    char b[96];
-    snprintf(b, sizeof(b), LV_SYMBOL_WIFI " Enviado: %s #%d\nRed: %s", pacienteID.c_str(), nSes,
-             sessionLogApSsid());
-    showToast(b, 3000, 0x1F8A3A);
+    char b[110];
+    if (bleAppSendSession()) {
+        snprintf(b, sizeof(b), LV_SYMBOL_BLUETOOTH " Enviado: %s #%d", pacienteID.c_str(), nSes);
+        showToast(b, 3000, 0x1F8A3A);
+    } else {
+        snprintf(b, sizeof(b), LV_SYMBOL_BLUETOOTH " Guardado: %s #%d\nSe envia al conectar la app", pacienteID.c_str(), nSes);
+        showToast(b, 3500, 0x8C5A1E);
+    }
 }
 // ==========================================
 
@@ -1062,19 +1077,21 @@ static void turtleUpdate() {
 //
 // 세 가지가 모두 OK 일 때만 자동으로 SELECCION DE MODO 로 넘어감.
 // 위치는 아래 상수로 조정하거나, 손가락으로 끌어서 옮기면 저장됨.
-constexpr lv_coord_t CONN_PANEL_X = 255;
+constexpr lv_coord_t CONN_PANEL_X = 245;
 constexpr lv_coord_t CONN_PANEL_Y = 95;
 
 static lv_obj_t *connPanel = NULL;
 static lv_obj_t *connLblTurtle = NULL;
 static lv_obj_t *connLblEmg = NULL;
 static lv_obj_t *connLblMsg = NULL;
+static lv_obj_t *connLblApp = NULL;
 static Preferences connPrefs;
 static bool connDragged = false;
 
 // EMG 회로가 연결되어 있는지 (근사): 입력의 DC 레벨이 0 V / 3.1 V 에 붙어 있지 않고 포화도 없음.
 // 핀이 완전히 떠 있는 경우까지 100% 구분하지는 못함 (한계).
 static bool emgSignalOk() {
+    if (EMG_REMOTE && !emgRemoteLinkOk()) return false;   // no llegan datos del ESP32 EMG
     EmgSnapshot s = emgRead();
     return s.sampleCount > 0 && !s.saturated && s.dcMv > 100.0f && s.dcMv < 3000.0f;
 }
@@ -1117,10 +1134,10 @@ static void createConnPanel() {
     if (ui_CONEXION_BLUETOOTH == NULL) return;
     connPrefs.begin("connui", false);
     connPanel = lv_obj_create(ui_CONEXION_BLUETOOTH);
-    lv_obj_set_size(connPanel, 200, 102);
+    lv_obj_set_size(connPanel, 230, 124);
     lv_coord_t x = connPrefs.getShort("x", CONN_PANEL_X);
     lv_coord_t y = connPrefs.getShort("y", CONN_PANEL_Y);
-    if (x < 0 || x > 280 || y < 0 || y > 218) { x = CONN_PANEL_X; y = CONN_PANEL_Y; }
+    if (x < 0 || x > 250 || y < 0 || y > 196) { x = CONN_PANEL_X; y = CONN_PANEL_Y; }
     lv_obj_set_pos(connPanel, x, y);
     lv_obj_set_style_pad_all(connPanel, 8, 0);
     lv_obj_set_style_radius(connPanel, 12, 0);
@@ -1134,7 +1151,8 @@ static void createConnPanel() {
     connRow("#3CCB5A " LV_SYMBOL_OK "# Pantalla: OK", 0);
     connLblTurtle = connRow("Tortuga: ...", 22);
     connLblEmg = connRow("EMG: ...", 44);
-    connLblMsg = connRow("", 66);
+    connLblApp = connRow("App: ...", 66);
+    connLblMsg = connRow("", 88);
 }
 
 static void updateConnPanel() {
@@ -1147,8 +1165,16 @@ static void updateConnPanel() {
     bool m = emgSignalOk();
     lv_label_set_text(connLblTurtle, t ? "#3CCB5A " LV_SYMBOL_OK "# Tortuga: conectada"
                                        : "#FF6B6B " LV_SYMBOL_CLOSE "# Tortuga: sin conexion");
-    lv_label_set_text(connLblEmg, m ? "#3CCB5A " LV_SYMBOL_OK "# EMG: senal OK"
-                                    : "#FF6B6B " LV_SYMBOL_CLOSE "# EMG: revisar cables");
+    if (m) {
+        lv_label_set_text(connLblEmg, "#3CCB5A " LV_SYMBOL_OK "# EMG: senal OK");
+    } else if (EMG_REMOTE && !emgRemoteLinkOk()) {
+        lv_label_set_text(connLblEmg, "#FF6B6B " LV_SYMBOL_CLOSE "# EMG: ESP32 sin conexion");
+    } else {
+        lv_label_set_text(connLblEmg, "#FF6B6B " LV_SYMBOL_CLOSE "# EMG: revisar cables");
+    }
+    // La app no es obligatoria para jugar (solo para ENVIAR), por eso no entra en "Todo listo"
+    lv_label_set_text(connLblApp, bleAppConnected() ? "#3CCB5A " LV_SYMBOL_BLUETOOTH "# App: conectada"
+                                                    : "#FFE81A " LV_SYMBOL_BLUETOOTH "# App: esperando...");
     lv_label_set_text(connLblMsg, (t && m) ? "#3CCB5A Todo listo#" : "#FFE81A Revisa lo marcado en rojo#");
 }
 
@@ -1172,7 +1198,8 @@ void setup() {
 
     // --- ESP-NOW 설정 ---
     // (실패해도 return 하지 않음: 화면은 계속 동작해야 함)
-    WiFi.mode(WIFI_AP_STA);   // STA = ESP-NOW (tortuga), AP = red propia para la app (ENVIAR)
+    // STA = ESP-NOW (tortuga y ESP32 EMG). AP = red Wi-Fi propia para la app (solo si SESSION_WIFI_AP)
+    WiFi.mode(SESSION_WIFI_AP ? WIFI_AP_STA : WIFI_STA);
     WiFi.disconnect();
     esp_wifi_set_channel(ESPNOW_CHANNEL, WIFI_SECOND_CHAN_NONE); // mismo canal que el XIAO
     if (esp_now_init() != ESP_OK) {
@@ -1192,8 +1219,12 @@ void setup() {
     // Red Wi-Fi propia + servidor de datos (mismo canal que ESP-NOW)
     sessionLogBegin();
 
-    // EMG 샘플링 시작 (2 kHz, core 0)
+    // EMG: modo remoto = recibe del ESP32 EMG por ESP-NOW (ver emg.h, EMG_REMOTE)
     emgBegin();
+    Serial.printf("[PANTALLA] MAC: %s  canal ESP-NOW %u\n", WiFi.macAddress().c_str(), ESPNOW_CHANNEL);
+
+    // Bluetooth con la app (GRABAR / ENVIAR)
+    bleAppBegin();
 
     // 백라이트 핀 켜기 (GPIO 45)
     pinMode(45, OUTPUT);
@@ -1285,7 +1316,8 @@ void loop() {
     lv_obj_t *scr = lv_scr_act();
     emgPanelUpdate(scr == ui_MODO_JUEGO || scr == ui_MODO_REHABILITACION);
     emgSerialUpdate();
-    sessionLogLoop();       // GRABAR 중 데이터 저장 + Wi-Fi 요청 처리
+    sessionLogLoop();
+    bleAppLoop();           // Bluetooth: comandos de la app + envio por pedazos       // GRABAR 중 데이터 저장 + Wi-Fi 요청 처리
     updateGrabarButton();
     updateConnPanel();
 

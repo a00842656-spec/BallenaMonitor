@@ -49,3 +49,20 @@ struct __attribute__((packed)) TelemetryMsg {
  uint16_t battery_mv;  // voltaje de la bateria (mV), ya corregido por el divisor
  uint8_t battery_pct;  // 0..100
 };
+
+
+// ---- EMG: ESP32 del circuito EMG -> pantalla -------------------------------------
+// El ESP32 que lee el circuito analogico (pin D34) procesa la senal (filtros + RMS)
+// y manda la envolvente cada EMG_MSG_PERIOD_MS. La pantalla decide la activacion
+// (umbral, histeresis, CAL) con estos datos. La tortuga ignora este mensaje.
+constexpr uint8_t EMG_MSG_MAGIC = 0x7C;
+constexpr uint32_t EMG_MSG_PERIOD_MS = 20;   // 50 Hz
+
+struct __attribute__((packed)) EmgMsg {
+  uint8_t magic;      // siempre EMG_MSG_MAGIC
+  uint8_t seq;        // contador (para detectar paquetes perdidos)
+  uint16_t rms_x10;   // envolvente RMS suavizada, decimas de mV (123 = 12.3 mV)
+  uint16_t peak_x10;  // pico |senal filtrada| desde el mensaje anterior, decimas de mV
+  uint16_t input_mv;  // nivel DC de la entrada del ADC (mV): ~0 o ~3100 = cable suelto
+  uint8_t flags;      // bit0 = entrada saturada, bit1 = filtros calentando (primer segundo)
+};
