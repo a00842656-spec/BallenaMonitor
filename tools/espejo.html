@@ -41,6 +41,8 @@
   #log.visible { display: flex; }
   #log pre { flex: 1; margin: 0; padding: 10px; overflow: auto; font: 12px/1.35 ui-monospace, Consolas, monospace;
     color: #c8d0d8; white-space: pre-wrap; word-break: break-all; }
+  #frmCmd { margin: 0; border-top: 1px solid var(--line); }
+  #cmd { width: 100%; border: 0; padding: 10px; background: #12171c; color: var(--text); font: 12px ui-monospace, Consolas, monospace; outline: none; }
   #aviso { margin: auto; max-width: 520px; padding: 24px; text-align: center; color: var(--muted); }
   #aviso b { color: var(--text); }
   @media (max-width: 800px) { #log { position: fixed; inset: auto 0 0 0; width: auto; height: 40%; } }
@@ -60,7 +62,8 @@
 </header>
 <main>
   <div id="zona"><canvas id="cv" width="480" height="320" class="nitido"></canvas></div>
-  <aside id="log"><pre id="logTxt"></pre></aside>
+  <aside id="log"><pre id="logTxt"></pre>
+    <form id="frmCmd"><input id="cmd" placeholder="Comando (? = estado) y Enter" autocomplete="off"></form></aside>
 </main>
 
 <script>
@@ -108,6 +111,10 @@ function texto(a, b) {
   const partes = lineaTxt.split("\n");
   lineaTxt = partes.pop();
   if (lineaTxt.length > 400) { partes.push(lineaTxt); lineaTxt = ""; }
+  for (const l of partes) {
+    if (l.includes("ESP-ROM")) { puedeEnviar = false; vioArranque = true; }                          // la pantalla se esta reiniciando
+    if (l.includes("[ESPEJO] listo") || l.includes("UI Setup Completed")) puedeEnviar = true;
+  }
   if (partes.length) {
     logTxt.textContent += partes.map((l) => l.replace(/[\x00-\x08\x0b-\x1f\x7f�]/g, "")).join("\n") + "\n";
     if (logTxt.textContent.length > 60000) logTxt.textContent = logTxt.textContent.slice(-40000);
@@ -170,13 +177,19 @@ function agregar(chunk) {
 }
 
 // Si la pantalla se reinicia, el canal de escritura puede quedar roto: se vuelve a pedir.
+let enviados = 0, erroresTx = 0;
+// No mandar nada mientras la pantalla arranca: si llega un byte antes de que el programa
+// abra el Serial, la entrada USB del ESP32-S3 se queda trabada hasta desconectar el cable.
+let puedeEnviar = false, vioArranque = false;
 async function enviar(s) {
-  if (!port) return;
+  if (!port || !puedeEnviar) return;
   try {
     if (!writer && port.writable) writer = port.writable.getWriter();
     if (!writer) return;
     await writer.write(new TextEncoder().encode(s));
+    enviados += s.length;
   } catch (e) {
+    erroresTx++;
     try { writer.releaseLock(); } catch (e2) {}
     writer = null;
   }
@@ -193,11 +206,12 @@ async function abrir(p) {
   quiereConectado = true;
   btnCon.textContent = "Desconectar"; btnCon.classList.remove("primary");
   estado("Conectado, esperando imagen…", "ok");
-  len = 0; lineaTxt = ""; conectadoEn = performance.now();
+  len = 0; lineaTxt = ""; conectadoEn = performance.now(); vioArranque = false;
   leyendo = leer(port);
   // Al abrir el puerto, Windows reinicia la pantalla: se manda "MF" cada segundo hasta que llega imagen,
   // y despues solo "M" ("sigo aqui").
-  enviar("MF");
+  puedeEnviar = false;
+  setTimeout(() => { if (!vioArranque) puedeEnviar = true; }, 2500);   // no se reinicio: ya se puede
   keepTimer = setInterval(() => enviar(paquetes > 0 && performance.now() - ultimoPaquete < 3000 ? "M" : "MF"), 1000);
 }
 
@@ -273,6 +287,7 @@ function ajustar() {
 new ResizeObserver(ajustar).observe(zona);
 window.addEventListener("resize", ajustar);
 $("chkEntero").onchange = ajustar;
+$("frmCmd").onsubmit = (e) => { e.preventDefault(); const c = $("cmd").value; if (c) { logTxt.textContent += "> " + c + "\n"; enviar(c + "\n"); } $("cmd").value = ""; };
 $("chkNitido").onchange = (e) => cv.classList.toggle("nitido", e.target.checked);
 $("chkLog").onchange = (e) => { logBox.classList.toggle("visible", e.target.checked); logTxt.scrollTop = logTxt.scrollHeight; ajustar(); };
 $("btnFull").onclick = () => { if (document.fullscreenElement) document.exitFullscreen(); else zona.requestFullscreen(); };
@@ -286,12 +301,12 @@ $("btnFoto").onclick = () => {
 let bytesAntes = 0;
 setInterval(() => {
   const kbs = (bytesRx - bytesAntes) / 1024; bytesAntes = bytesRx;
-  stats.textContent = port ? `${kbs.toFixed(0)} KB/s · ${paquetes} paquetes${malos ? " · " + malos + " con error" : ""}` : "";
+  stats.textContent = port ? `${kbs.toFixed(0)} KB/s · ${paquetes} paquetes${malos ? " · " + malos + " con error" : ""} · enviados ${enviados}${erroresTx ? " (" + erroresTx + " fallaron)" : ""}` : "";
   if (port && paquetes > 0 && performance.now() - ultimoPaquete < 4000) estado("Conectado", "ok");
   else if (port && performance.now() - ultimoPaquete > 4000 && bytesRx > 0 && paquetes === 0)
-    estado(performance.now() - conectadoEn < 20000 ? "Conectado, esperando a que la pantalla termine de arrancar…"
+    estado(performance.now() - conectadoEn < 30000 ? "Conectado, esperando a que la pantalla termine de arrancar…"
                                                     : "Conectado, pero sin imagen: ¿la pantalla tiene el programa nuevo?",
-           performance.now() - conectadoEn < 20000 ? "ok" : "bad");
+           performance.now() - conectadoEn < 30000 ? "ok" : "bad");
 }, 1000);
 </script>
 </body>
