@@ -34,8 +34,8 @@
   #stats { margin-left: auto; color: var(--muted); font-variant-numeric: tabular-nums; }
   main { flex: 1; display: flex; min-height: 0; }
   #zona { flex: 1; display: flex; align-items: center; justify-content: center; padding: 16px; min-width: 0; }
-  canvas { background: #000; max-width: 100%; max-height: 100%; aspect-ratio: 480 / 320;
-    width: 100%; height: auto; border-radius: 4px; box-shadow: 0 0 0 1px var(--line); }
+  #zona { overflow: hidden; }
+  canvas { background: #000; display: block; flex: none; border-radius: 2px; box-shadow: 0 0 0 1px var(--line); }
   canvas.nitido { image-rendering: pixelated; }
   #log { width: 360px; display: none; flex-direction: column; border-left: 1px solid var(--line); background: var(--panel); }
   #log.visible { display: flex; }
@@ -52,6 +52,7 @@
   <button id="btnCon" class="primary">Conectar</button>
   <span id="estado"><span id="punto"></span><span id="txtEstado">Sin conectar</span></span>
   <label><input type="checkbox" id="chkNitido" checked> Nítido</label>
+  <label title="Tamaño x2, x3... exacto: cada pixel de la ballena = un cuadro igual"><input type="checkbox" id="chkEntero"> Escala exacta</label>
   <label><input type="checkbox" id="chkLog"> Serial</label>
   <button id="btnFoto" title="Guardar la imagen como PNG">Captura</button>
   <button id="btnFull" title="Pantalla completa">⛶</button>
@@ -245,9 +246,25 @@ if ("serial" in navigator) {
   });
 }
 
+// Tamaño: lo mas grande que quepa, siempre con la proporcion 3:2 de la pantalla (480 x 320), sin estirar
+const zona = $("zona");
+function ajustar() {
+  const r = zona.getBoundingClientRect();
+  const aw = r.width - 32, ah = r.height - 32;          // 16 px de margen
+  if (aw <= 0 || ah <= 0) return;
+  const dpr = window.devicePixelRatio || 1;
+  let s = Math.min(aw / W, ah / H);                      // escala en px de CSS
+  if ($("chkEntero").checked && s * dpr >= 1) s = Math.floor(s * dpr) / dpr;   // pixeles fisicos enteros
+  else s = Math.floor(W * s * dpr) / (W * dpr);          // ancho entero en pixeles fisicos
+  cv.style.width = (W * s) + "px";
+  cv.style.height = (H * s) + "px";
+}
+new ResizeObserver(ajustar).observe(zona);
+window.addEventListener("resize", ajustar);
+$("chkEntero").onchange = ajustar;
 $("chkNitido").onchange = (e) => cv.classList.toggle("nitido", e.target.checked);
-$("chkLog").onchange = (e) => { logBox.classList.toggle("visible", e.target.checked); logTxt.scrollTop = logTxt.scrollHeight; };
-$("btnFull").onclick = () => { if (document.fullscreenElement) document.exitFullscreen(); else $("zona").requestFullscreen(); };
+$("chkLog").onchange = (e) => { logBox.classList.toggle("visible", e.target.checked); logTxt.scrollTop = logTxt.scrollHeight; ajustar(); };
+$("btnFull").onclick = () => { if (document.fullscreenElement) document.exitFullscreen(); else zona.requestFullscreen(); };
 $("btnFoto").onclick = () => {
   const a = document.createElement("a");
   const t = new Date(); const z = (n) => String(n).padStart(2, "0");
