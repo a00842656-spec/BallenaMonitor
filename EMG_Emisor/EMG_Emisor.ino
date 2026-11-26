@@ -8,7 +8,7 @@
 // Cada 20 ms manda {RMS, pico, nivel DC, saturado} a la pantalla.
 // La pantalla decide si hay contraccion (umbral, CAL, barra) y mueve la tortuga.
 //
-// Conexiones (iguales que antes): circuito -> 3V3, GND, D34. Alimentacion por USB
+// Conexiones (iguales que antes): circuito -> 3V3, GND, D35. Alimentacion por USB
 // (o 5 V del regulador en VIN y GND).
 //
 // Serial Monitor / Plotter (115200): 'p' = plot on/off (mismo formato del equipo), '?' = estado.
@@ -25,7 +25,7 @@
 #include "motor_protocol.h"
 
 // ---- Configuracion ------------------------------------------------------------
-constexpr int EMG_PIN = 34;   // ADC1: funciona con Wi-Fi / ESP-NOW encendido
+constexpr int EMG_PIN = 35;   // ADC1: funciona con Wi-Fi / ESP-NOW encendido
 
 // A quien mandar. Broadcast funciona sin saber la MAC de la pantalla.
 // (Opcional) poner la MAC que imprime la pantalla al arrancar: "[PANTALLA] MAC: ..."
