@@ -178,8 +178,9 @@ async function abrir(p) {
   port = p;
   estado("Abriendo…");
   await port.open({ baudRate: 115200, bufferSize: 1 << 16 });
-  // DTR=1 y RTS=0: asi la pantalla no se reinicia al conectar
-  try { await port.setSignals({ dataTerminalReady: true, requestToSend: false }); } catch (e) {}
+  // DTR=0 y RTS=0 juntos (igual que el Serial Monitor de ESP32). Con DTR=1 al soltar RTS,
+  // el ESP32-S3 entra en modo de descarga (pantalla congelada, sin imagen).
+  try { await port.setSignals({ dataTerminalReady: false, requestToSend: false }); } catch (e) {}
   writer = port.writable.getWriter();
   quiereConectado = true;
   btnCon.textContent = "Desconectar"; btnCon.classList.remove("primary");
