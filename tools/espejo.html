@@ -169,9 +169,17 @@ function agregar(chunk) {
   procesar();
 }
 
+// Si la pantalla se reinicia, el canal de escritura puede quedar roto: se vuelve a pedir.
 async function enviar(s) {
-  if (!writer) return;
-  try { await writer.write(new TextEncoder().encode(s)); } catch (e) { /* se desconecto */ }
+  if (!port) return;
+  try {
+    if (!writer && port.writable) writer = port.writable.getWriter();
+    if (!writer) return;
+    await writer.write(new TextEncoder().encode(s));
+  } catch (e) {
+    try { writer.releaseLock(); } catch (e2) {}
+    writer = null;
+  }
 }
 
 async function abrir(p) {
@@ -185,13 +193,15 @@ async function abrir(p) {
   quiereConectado = true;
   btnCon.textContent = "Desconectar"; btnCon.classList.remove("primary");
   estado("Conectado, esperando imagen…", "ok");
-  len = 0; lineaTxt = "";
-  await enviar("MF");                                   // encender el espejo + mandar todo
-  keepTimer = setInterval(() => enviar("M"), 1000);     // "sigo aqui"
+  len = 0; lineaTxt = ""; conectadoEn = performance.now();
   leyendo = leer(port);
+  // Al abrir el puerto, Windows reinicia la pantalla: se manda "MF" cada segundo hasta que llega imagen,
+  // y despues solo "M" ("sigo aqui").
+  enviar("MF");
+  keepTimer = setInterval(() => enviar(paquetes > 0 && performance.now() - ultimoPaquete < 3000 ? "M" : "MF"), 1000);
 }
 
-let leyendo = null, cerrando = false;
+let leyendo = null, cerrando = false, conectadoEn = 0;
 
 async function leer(p) {
   try {
@@ -279,7 +289,9 @@ setInterval(() => {
   stats.textContent = port ? `${kbs.toFixed(0)} KB/s · ${paquetes} paquetes${malos ? " · " + malos + " con error" : ""}` : "";
   if (port && paquetes > 0 && performance.now() - ultimoPaquete < 4000) estado("Conectado", "ok");
   else if (port && performance.now() - ultimoPaquete > 4000 && bytesRx > 0 && paquetes === 0)
-    estado("Conectado, pero sin imagen: ¿la pantalla tiene el programa nuevo?", "bad");
+    estado(performance.now() - conectadoEn < 20000 ? "Conectado, esperando a que la pantalla termine de arrancar…"
+                                                    : "Conectado, pero sin imagen: ¿la pantalla tiene el programa nuevo?",
+           performance.now() - conectadoEn < 20000 ? "ok" : "bad");
 }, 1000);
 </script>
 </body>
