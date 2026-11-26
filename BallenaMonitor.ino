@@ -495,11 +495,128 @@ constexpr uint32_t DRAW_BUF_LINES = 20;   // 2 x 20 lineas = la misma RAM que an
 static lv_color_t *drawBuf1 = NULL;
 static lv_color_t *drawBuf2 = NULL;
 
+// ============ ESPEJO DE PANTALLA POR USB ============
+// La misma imagen de la pantalla, en grande, en la computadora conectada por el cable USB.
+// En la computadora: abrir tools/espejo.html en Chrome o Edge → Conectar → elegir el puerto.
+// Solo manda imagen mientras esa pagina esta abierta (la pagina manda 'M' cada segundo);
+// sin la pagina no cambia nada. Antes de subir el programa, cerrar la pagina (usa el puerto).
+// Paquete: "LVM1" + x,y,w,h (uint16) + w*h pixeles RGB565 + suma (uint16), todo little-endian.
+constexpr bool ESPEJO_USB = true;              // false = apagado del todo
+constexpr uint32_t ESPEJO_TIMEOUT_MS = 3000;   // sin 'M' en este tiempo → se apaga solo
+constexpr uint32_t ESPEJO_TX_BUFFER = 4096;    // buffer de salida del USB (RAM interna)
+constexpr uint32_t ESPEJO_PKT_PIX = 960;       // pixeles por paquete (2 filas de 480)
+constexpr uint32_t ESPEJO_US_POR_LOOP = 4000;  // tiempo maximo mandando por vuelta del loop
+
+static uint16_t *espejoFb = NULL;   // copia de la pantalla en PSRAM (300 KB)
+static bool espejoOn = false;
+static uint32_t espejoUltimoM = 0;
+static int16_t espSucX1 = 0, espSucY1 = 0, espSucX2 = -1, espSucY2 = -1;   // zona cambiada, falta mandar
+static int16_t espEnvX1 = 0, espEnvX2 = -1, espEnvY = 0, espEnvY2 = -1;    // zona que se esta mandando
+static uint8_t espejoPkt[12 + ESPEJO_PKT_PIX * 2 + 2];
+
+static void espejoMarcar(int16_t x1, int16_t y1, int16_t x2, int16_t y2) {
+    if (espSucX2 < espSucX1) {
+        espSucX1 = x1; espSucY1 = y1; espSucX2 = x2; espSucY2 = y2;
+    } else {
+        if (x1 < espSucX1) espSucX1 = x1;
+        if (y1 < espSucY1) espSucY1 = y1;
+        if (x2 > espSucX2) espSucX2 = x2;
+        if (y2 > espSucY2) espSucY2 = y2;
+    }
+}
+
+// se llama desde my_disp_flush: copia el pedazo dibujado (rapido, sin USB)
+static inline void espejoCopiar(const lv_area_t *a, const lv_color_t *src) {
+    if (!espejoOn || espejoFb == NULL) return;
+    if (a->x1 < 0 || a->y1 < 0 || a->x2 >= screenWidth || a->y2 >= screenHeight) return;
+    const int16_t w = a->x2 - a->x1 + 1;
+    const uint16_t *s = (const uint16_t *)src;
+    for (int16_t y = a->y1; y <= a->y2; y++, s += w) {
+        memcpy(&espejoFb[(uint32_t)y * screenWidth + a->x1], s, w * 2);
+    }
+    espejoMarcar(a->x1, a->y1, a->x2, a->y2);
+}
+
+static void espejoApagar() {
+    espejoOn = false;
+    espSucX2 = -1; espSucX1 = 0;
+    espEnvY2 = -1; espEnvY = 0;
+}
+
+// comandos de la pagina (llegan por emgSerialUpdate): M = encender / sigo aqui, m = apagar, F = todo otra vez
+bool mirrorSerialCommand(char c) {
+    if (!ESPEJO_USB) return false;
+    if (c == 'M') {
+        if (!espejoOn && espejoFb != NULL) {
+            espejoOn = true;
+            lv_obj_invalidate(lv_scr_act());   // redibuja todo → la copia queda completa
+            Serial.println("[ESPEJO] encendido");
+        }
+        espejoUltimoM = millis();
+        return true;
+    }
+    if (c == 'F') {
+        if (espejoOn) espejoMarcar(0, 0, screenWidth - 1, screenHeight - 1);
+        return true;
+    }
+    if (c == 'm') {
+        if (espejoOn) Serial.println("[ESPEJO] apagado");
+        espejoApagar();
+        return true;
+    }
+    return false;
+}
+
+// en el loop: manda lo que cambio, por pedazos, solo si cabe en el buffer (nunca detiene la pantalla)
+void espejoUpdate() {
+    if (!ESPEJO_USB || !espejoOn) return;
+    if (millis() - espejoUltimoM > ESPEJO_TIMEOUT_MS) {   // se cerro la pagina
+        espejoApagar();
+        return;
+    }
+    const uint32_t t0 = micros();
+    while (micros() - t0 < ESPEJO_US_POR_LOOP) {
+        if (espEnvY > espEnvY2) {                 // termino la zona anterior: tomar la nueva
+            if (espSucX2 < espSucX1) return;      // nada que mandar
+            espEnvX1 = espSucX1; espEnvX2 = espSucX2;
+            espEnvY = espSucY1;  espEnvY2 = espSucY2;
+            espSucX2 = -1; espSucX1 = 0;
+        }
+        const uint16_t w = espEnvX2 - espEnvX1 + 1;
+        uint16_t rows = ESPEJO_PKT_PIX / w;
+        if (rows < 1) rows = 1;
+        if (rows > espEnvY2 - espEnvY + 1) rows = espEnvY2 - espEnvY + 1;
+        const size_t nPix = (size_t)w * rows;
+        const size_t n = 12 + nPix * 2 + 2;
+        if (Serial.availableForWrite() < (int)(n + 256)) return;   // deja lugar para los textos del Serial
+
+        uint8_t *p = espejoPkt;
+        p[0] = 'L'; p[1] = 'V'; p[2] = 'M'; p[3] = '1';
+        const uint16_t hdr[4] = {(uint16_t)espEnvX1, (uint16_t)espEnvY, w, rows};
+        memcpy(p + 4, hdr, 8);
+        uint16_t *px = (uint16_t *)(p + 12);
+        uint16_t suma = 0;
+        for (uint16_t r = 0; r < rows; r++) {
+            const uint16_t *src = &espejoFb[(uint32_t)(espEnvY + r) * screenWidth + espEnvX1];
+            for (uint16_t i = 0; i < w; i++) {
+                const uint16_t v = src[i];
+                *px++ = v;
+                suma += v;
+            }
+        }
+        memcpy(p + 12 + nPix * 2, &suma, 2);
+        Serial.write(p, n);
+        espEnvY += rows;
+    }
+}
+// ==========================================
+
 // LVGL 디스플레이 플러시 함수
 void my_disp_flush(lv_disp_drv_t *disp_drv, const lv_area_t *area, lv_color_t *color_p)
 {
     uint32_t w = (area->x2 - area->x1 + 1);
     uint32_t h = (area->y2 - area->y1 + 1);
+    espejoCopiar(area, color_p);
 
     if (DISPLAY_DMA && drawBuf2 != NULL) {
         // la transaccion queda abierta; pushImageDMA espera a que termine el pedazo anterior
@@ -1834,6 +1951,9 @@ void Conectar(lv_event_t * e) {
 
 
 void setup() {
+#if ARDUINO_USB_CDC_ON_BOOT && ARDUINO_USB_MODE
+    if (ESPEJO_USB) Serial.setTxBufferSize(ESPEJO_TX_BUFFER);   // antes de begin (por defecto 256)
+#endif
     Serial.begin(115200);
 #if ARDUINO_USB_CDC_ON_BOOT && ARDUINO_USB_MODE
     // USB 로 노트북에 연결돼 있는데 Serial Monitor 가 안 열려 있으면, Serial 출력이
@@ -1900,6 +2020,11 @@ void setup() {
     }
     Serial.printf("[PANTALLA] buffers: %s, RAM interna libre %u bytes\n", drawBuf2 ? "2 + DMA" : "1",
                   (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
+    if (ESPEJO_USB) {   // copia de la pantalla para el espejo USB: en PSRAM, no gasta RAM interna
+        espejoFb = (uint16_t *)heap_caps_malloc(screenWidth * screenHeight * 2, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        Serial.println(espejoFb ? "[ESPEJO] listo: abrir tools/espejo.html en la computadora"
+                                : "[ESPEJO] sin PSRAM: espejo apagado");
+    }
 
     static lv_disp_drv_t disp_drv;
     lv_disp_drv_init(&disp_drv);
@@ -1986,6 +2111,7 @@ void loop() {
     lv_obj_t *scr = lv_scr_act();
     emgPanelUpdate(scr == ui_MODO_JUEGO || scr == ui_MODO_REHABILITACION);
     emgSerialUpdate();
+    espejoUpdate();   // espejo de la pantalla en la computadora (solo con tools/espejo.html abierto)
     sessionLogLoop();
     if (USAR_BLUETOOTH_APP) bleAppLoop();
     firestoreResultUpdate();   // aviso "Enviado a la app" / error

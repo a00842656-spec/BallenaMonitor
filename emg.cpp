@@ -363,12 +363,17 @@ float emgMvcMv() { return savedMvcMv; }
 // ---- Serial ------------------------------------------------------------------
 static bool plotOn = false;
 
+// Comandos del espejo de pantalla (M, m, F). Lo define BallenaMonitor.ino; si no, no hace nada.
+__attribute__((weak)) bool mirrorSerialCommand(char) { return false; }
+
 void emgSerialUpdate() {
   saveThresholdIfDue();
   // Comandos por el Serial Monitor
   while (Serial.available()) {
     char c = Serial.read();
-    if (c == 'p' || c == 'P') {
+    if (mirrorSerialCommand(c)) {
+      // espejo de pantalla (tools/espejo.html)
+    } else if (c == 'p' || c == 'P') {
       plotOn = !plotOn;
       Serial.printf("[EMG] plot %s\n", plotOn ? "ON" : "OFF");
     } else if (c == 'c' || c == 'C') {

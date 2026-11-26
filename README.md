@@ -27,7 +27,7 @@ Al terminar una sesión la sube a Firestore para la app del fisioterapeuta.
 | `EMG_Emisor/` | ESP32 del circuito EMG (pin D34): filtros + RMS, manda la envolvente a la pantalla |
 | `Tortuga/` | XIAO ESP32-C6 de la tortuga: motor y batería |
 | `extras/` | `lv_conf.h` y `boards.local.txt` (partición de 12 MB) |
-| `tools/` | `mp3_header.py` (sonidos → `.h`), `nube.py` (máscara de la nube) |
+| `tools/` | `espejo.html` (la pantalla en la computadora), `mp3_header.py` (sonidos → `.h`), `nube.py` (máscara de la nube) |
 | `PARA_LA_APP_*.md` | Cómo recibe la app los datos (Wi-Fi propio / Bluetooth) |
 
 ## Instalar (una vez por computadora)
@@ -134,6 +134,18 @@ copy secrets.example.h secrets.h     # luego editar secrets.h
 - Sin `secrets.h` el programa compila igual (con un aviso), pero ENVIAR no se podrá conectar.
 - Cada integrante pone su propio hotspot en su `secrets.h`.
 
+## Espejo en la computadora
+
+Para ver la pantalla en grande (presentaciones, videos, capturas para el reporte):
+1. Conectar la pantalla a la computadora con el cable USB.
+2. Abrir `tools/espejo.html` con doble clic en **Chrome o Edge** → **Conectar** → elegir el puerto (COMx).
+
+La pantalla sigue funcionando igual; la computadora solo muestra lo mismo. **Captura** guarda la imagen como PNG y **Serial** muestra los mensajes del Serial Monitor.
+- Antes de subir un programa: **Desconectar** (la página usa el puerto, igual que el Serial Monitor).
+- Un cambio de pantalla completa tarda ~0.5 s en aparecer en la computadora (USB 1.1); los cambios pequeños se ven al momento.
+- Con electrodos puestos y la laptop conectada, la laptop debe estar **sin cargador**.
+- `ESPEJO_USB = false` en `BallenaMonitor.ino` lo apaga del todo.
+
 ## Sonidos
 
 Para agregar una voz o efecto:
@@ -157,6 +169,7 @@ La nube está dibujada dentro del fondo `ui_img_4_png.c`. Su relleno es una más
 |---|---|
 | Tortuga o EMG en ✗ | La placa está apagada o sin batería; encenderlas y reiniciar la pantalla. Si sigue, ver el Serial (`arduino-cli monitor -p COMx --config 115200`) |
 | Batería de la ballena siempre `--` | `BAT_PIN = -1` en `EMG_Emisor` (no hay divisor conectado) |
+| Espejo: "sin imagen" o no deja conectar | Serial Monitor abierto en el mismo puerto, o la pantalla tiene el programa anterior |
 | *text section exceeds available space* | Se compiló sin `PartitionScheme=app12M` |
 | Errores rojos en VS Code pero compila bien | Solo IntelliSense (ver arriba) |
 | ENVIAR falla | Hotspot apagado, en 5 GHz, con otro nombre o falta `secrets.h`; el mensaje en pantalla y el Serial dicen la causa |
