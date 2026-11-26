@@ -1,3 +1,5 @@
 build/
 *.bak
 desktop.ini
+# datos del hotspot (ver secrets.example.h)
+secrets.h

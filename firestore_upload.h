@@ -15,8 +15,17 @@
 #include <Arduino.h>
 
 // ---- Configuracion (igual que CODIGOFIRESTORE.ino) ------------------------------
-#define FIRESTORE_WIFI_SSID "IPhone"     // nombre EXACTO del hotspot (mayusculas/espacios se corrigen solos)
-#define FIRESTORE_WIFI_PASS "A00842656"
+// El nombre y la contrasena del hotspot NO van en el repositorio: van en secrets.h
+// (esta en .gitignore). Para crearlo: copiar secrets.example.h como secrets.h y
+// poner los datos del hotspot. Sin secrets.h el programa compila igual, pero
+// ENVIAR no se podra conectar.
+#if __has_include("secrets.h")
+#include "secrets.h"
+#else
+#warning "Falta secrets.h: copia secrets.example.h como secrets.h y pon el hotspot (ENVIAR no funcionara)"
+#define FIRESTORE_WIFI_SSID "SIN_CONFIGURAR"
+#define FIRESTORE_WIFI_PASS ""
+#endif
 #define FIRESTORE_PROJECT_ID "emg-display"
 #define FIRESTORE_COLLECTION "consultas"
 
