@@ -750,7 +750,7 @@ static const size_t ESP_WS_TX_BYTES = 4 + 12 + ESPEJO_PKT_PIX_WIFI * 2 + 2;
 void espejoWifiBegin() {
     if (!ESPEJO_WIFI) return;
     espWsTx = (uint8_t *)heap_caps_malloc(ESP_WS_TX_BYTES, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-    if (espWsTx == NULL) return;
+    if (espWsTx == NULL) { Serial.println("[ESPEJO] Wi-Fi: sin memoria (PSRAM)"); return; }
     // mismo canal que ESP-NOW: la tortuga y la EMG siguen funcionando
     if (!WiFi.softAP(ESPEJO_WIFI_SSID, ESPEJO_WIFI_PASS, ESPNOW_CHANNEL, 0, 2)) {
         Serial.println("[ESPEJO] no se pudo crear la red Wi-Fi");
@@ -2293,10 +2293,12 @@ void setup() {
         }
     }
     // --- ESP-NOW 설정 끝 ---
-    espejoWifiBegin();   // red "PERLA-Ballena" para el espejo sin cable (antes de firestoreBegin)
 
     // Red Wi-Fi propia + servidor de datos (mismo canal que ESP-NOW)
     sessionLogBegin();
+    // red "PERLA-Ballena" para el espejo sin cable: despues de sessionLogBegin (que apaga su propia red
+    // cuando SESSION_WIFI_AP = false) y antes de firestoreBegin (que toma la hora por el hotspot)
+    espejoWifiBegin();
 
     // EMG: modo remoto = recibe del ESP32 EMG por ESP-NOW (ver emg.h, EMG_REMOTE)
     emgBegin();
