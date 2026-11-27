@@ -133,9 +133,33 @@ function texto(a, b) {
 
 function buscarMagia(i) {
   for (let k = i; k + 3 < len; k++) {
-    if (buf[k] === 0x4C && buf[k + 1] === 0x56 && buf[k + 2] === 0x4D && buf[k + 3] === 0x31) return k;   // "LVM1"
+    if (buf[k] === 0x4C && buf[k + 1] === 0x56 && (buf[k + 2] === 0x4D || buf[k + 2] === 0x52) && buf[k + 3] === 0x31)
+      return k;   // "LVM1" (sin comprimir) o "LVR1" (comprimido)
   }
   return -1;
+}
+
+// "LVR1": byte n < 128 → siguen n+1 pixeles; n >= 128 → el siguiente pixel se repite n-126 veces
+const tmpPx = new Uint16Array(W * H);
+function descomprimir(p, encLen, x, y, w, h, sumaEsperada) {
+  const fin = p + encLen, total = w * h;
+  let cnt = 0, suma = 0;
+  while (p < fin && cnt <= total) {
+    const c = buf[p++];
+    if (c < 128) {
+      for (let j = 0; j <= c && cnt < total; j++, p += 2) { const v = buf[p] | (buf[p + 1] << 8); tmpPx[cnt++] = v; suma = (suma + v) & 0xFFFF; }
+    } else {
+      const v = buf[p] | (buf[p + 1] << 8); p += 2;
+      for (let j = 0; j < c - 126 && cnt < total; j++) { tmpPx[cnt++] = v; suma = (suma + v) & 0xFFFF; }
+    }
+  }
+  if (cnt !== total || suma !== sumaEsperada) return false;
+  let k = 0;
+  for (let r = 0; r < h; r++) {
+    let o = (y + r) * W + x;
+    for (let c = 0; c < w; c++) px32[o++] = lut[tmpPx[k++]];
+  }
+  return true;
 }
 
 function procesar() {
@@ -149,6 +173,20 @@ function procesar() {
     const x = buf[m + 4] | (buf[m + 5] << 8), y = buf[m + 6] | (buf[m + 7] << 8);
     const w = buf[m + 8] | (buf[m + 9] << 8), h = buf[m + 10] | (buf[m + 11] << 8);
     if (w === 0 || h === 0 || x + w > W || y + h > H) { malos++; tirar = true; i = m + 4; continue; }
+    if (buf[m + 2] === 0x52) {   // "LVR1": comprimido
+      if (len - m < 14) { i = m; break; }
+      const encLen = buf[m + 12] | (buf[m + 13] << 8);
+      const n = 14 + encLen + 2;
+      if (len - m < n) { i = m; break; }
+      if (!descomprimir(m + 14, encLen, x, y, w, h, buf[m + 14 + encLen] | (buf[m + 15 + encLen] << 8))) {
+        malos++; tirar = true; i = m + 4; continue;
+      }
+      if (x < dx1) dx1 = x; if (y < dy1) dy1 = y;
+      if (x + w - 1 > dx2) dx2 = x + w - 1; if (y + h - 1 > dy2) dy2 = y + h - 1;
+      paquetes++; ultimoPaquete = performance.now();
+      i = m + n;
+      continue;
+    }
     const n = 12 + w * h * 2 + 2;
     if (len - m < n) { i = m; break; }
     let suma = 0, k = m + 12;
