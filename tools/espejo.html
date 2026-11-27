@@ -412,7 +412,7 @@ setInterval(() => {
   const kbs = (bytesRx - bytesAntes) / 1024; bytesAntes = bytesRx;
   stats.textContent = conectado() ? `${kbs.toFixed(0)} KB/s · ${paquetes} paquetes${malos ? " · " + malos + " con error" : ""} · enviados ${enviados}${erroresTx ? " (" + erroresTx + " fallaron)" : ""}` : "";
   if (MODO_WIFI) {
-    if (conectado()) estado(paquetes > 0 && performance.now() - ultimoPaquete < 4000 ? "Conectado por Wi-Fi" : "Conectado por Wi-Fi, esperando imagen…", "ok");
+    if (conectado()) estado(paquetesConexion > 0 ? "Conectado por Wi-Fi" : "Conectado por Wi-Fi, esperando imagen…", "ok");
     return;
   }
   if (port && paquetes > 0 && performance.now() - ultimoPaquete < 4000) estado("Conectado", "ok");
@@ -423,7 +423,12 @@ setInterval(() => {
 }, 1000);
 
 // ---- Wi-Fi: la pagina la sirve la ballena; la imagen llega por WebSocket (puerto 81) ----
+let cortes = 0;
+// Solo la pestaña que se esta viendo se conecta: si hay otra pestaña (u otro aparato) abierta con la
+// ballena, se quitarian la conexion una a la otra cada segundo (la ballena atiende a uno a la vez).
 function conectarWifi() {
+  if (document.hidden) { estado("En pausa (pestaña oculta)"); return; }
+  if (ws && (ws.readyState === 0 || ws.readyState === 1)) return;
   estado("Conectando por Wi-Fi…");
   try { ws = new WebSocket("ws://" + location.hostname + ":81/"); } catch (e) { setTimeout(conectarWifi, 2000); return; }
   ws.binaryType = "arraybuffer";
@@ -435,11 +440,13 @@ function conectarWifi() {
     keepTimer = setInterval(() => enviar(paquetesConexion > 0 ? "M" : "MF"), 1000);
   };
   ws.onmessage = (ev) => { if (ev.data instanceof ArrayBuffer) agregar(new Uint8Array(ev.data)); };
-  ws.onclose = () => {
+  ws.onclose = (e) => {
     clearInterval(keepTimer); keepTimer = null;
     soltar(null);
-    estado("Sin conexión con la ballena: reintentando… (¿sigue conectada la red " + "PERLA-Ballena?)", "bad");
-    setTimeout(conectarWifi, 1500);                  // p. ej. durante ENVIAR se corta unos segundos
+    cortes++;
+    const motivo = e.reason ? "la ballena dijo: " + e.reason : "código " + e.code;
+    estado("Sin conexión (" + motivo + ", corte #" + cortes + "): reintentando…", "bad");
+    if (!document.hidden) setTimeout(conectarWifi, 1500);   // p. ej. durante ENVIAR se corta unos segundos
   };
   ws.onerror = () => { try { ws.close(); } catch (e) {} };
 }
@@ -449,6 +456,10 @@ if (MODO_WIFI) {
   $("chkRapido").onchange = (e) => enviar((e.target.checked ? "H" : "h") + "F");
   $("chkLog").parentElement.style.display = "none";   // los mensajes del Serial solo van por cable
   conectarWifi();
+  document.addEventListener("visibilitychange", () => {
+    if (document.hidden) { if (ws) { try { enviar("m"); ws.close(); } catch (e) {} } }
+    else conectarWifi();
+  });
 }
 </script>
 </body>

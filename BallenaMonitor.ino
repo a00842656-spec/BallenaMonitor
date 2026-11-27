@@ -915,6 +915,18 @@ static void espWsCerrar() {
 // cierra y dice por que en el Serial (para encontrar cortes)
 static void espWsCerrarPor(const char *motivo, int err = 0) {
     if (!espWsAbierto) return;
+    // avisarle al navegador por que se corta (lo muestra arriba en la pagina)
+    const int fd = espWsCli.fd();
+    if (fd >= 0) {
+        uint8_t f[2 + 2 + 100];
+        size_t rl = strlen(motivo);
+        if (rl > 100) rl = 100;
+        f[0] = 0x88;                      // cierre
+        f[1] = (uint8_t)(2 + rl);
+        f[2] = 1000 >> 8; f[3] = 1000 & 0xFF;
+        memcpy(f + 4, motivo, rl);
+        lwip_send(fd, f, 4 + rl, MSG_DONTWAIT);
+    }
     if (err) Serial.printf("[ESPEJO] Wi-Fi: se corto (%s, errno %d)\n", motivo, err);
     else Serial.printf("[ESPEJO] Wi-Fi: se corto (%s)\n", motivo);
     espWsCerrar();
@@ -1041,13 +1053,21 @@ static void espWsMandar() {
     while (espWifi.on && millis() - t0 < 100) {
         const size_t n = espejoArmarRle(espWifi, espWsTx + 4, espWsTmp, ESPEJO_PKT_PIX_WIFI, espWifiMitad);
         if (n == 0) return;
-        espWsTx[0] = 0x82;            // mensaje binario completo
-        espWsTx[1] = 126;
-        espWsTx[2] = (uint8_t)(n >> 8);
-        espWsTx[3] = (uint8_t)n;
-        size_t off = 0;
-        while (off < n + 4) {
-            const int w = lwip_send(fd, espWsTx + off, n + 4 - off, 0);
+        // Cabecera WebSocket: el largo debe ir en la forma mas corta (si no, el navegador corta la conexion)
+        size_t off, fin = n + 4;
+        if (n < 126) {                // paquete chico: 2 bytes de cabecera
+            off = 2;
+            espWsTx[2] = 0x82;        // mensaje binario completo
+            espWsTx[3] = (uint8_t)n;
+        } else {                      // 4 bytes: 126 + largo de 16 bits
+            off = 0;
+            espWsTx[0] = 0x82;
+            espWsTx[1] = 126;
+            espWsTx[2] = (uint8_t)(n >> 8);
+            espWsTx[3] = (uint8_t)n;
+        }
+        while (off < fin) {
+            const int w = lwip_send(fd, espWsTx + off, fin - off, 0);
             if (w <= 0) { espWsCerrarPor("no se pudo mandar (red muy lenta?)", errno); return; }
             off += w;
         }

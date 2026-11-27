@@ -14,7 +14,7 @@
 
 // Canal Wi-Fi fijo para ESP-NOW. Ambos equipos deben usar el mismo.
 // Si el WT32 se conecta a un router, este valor debe ser el canal del router.
-constexpr uint8_t ESPNOW_CHANNEL = 1;
+constexpr uint8_t ESPNOW_CHANNEL = 6;
 
 // Primer byte de cada mensaje, para ignorar paquetes ESP-NOW ajenos
 constexpr uint8_t MOTOR_MSG_MAGIC = 0x7A;
