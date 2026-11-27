@@ -85,7 +85,17 @@ static volatile uint32_t lastTelemetryMs = 0;
 static volatile uint16_t turtleBatteryMv = 0;
 static volatile uint8_t turtleBatteryPct = 0;
 
-// ---- Recepcion: bateria de la ballena (la manda el ESP32 de la EMG) ----
+// ---- Bateria de la ballena (pila de 9 V de la pantalla) ----
+// Se mide en la misma pantalla con un divisor de voltaje:
+//   + de la pila (despues del boton rojo = IN+ del regulador) -> 100k -> EXT_IO1 -> 30k -> GND
+//   EXT_IO1 = GPIO10 = pin 3 del conector "Extended IO" (cable amarillo del arnes)
+// BALLENA_BAT_PIN = -1: no se mide aqui; la manda el ESP32 de la EMG (BAT_PIN de EMG_Emisor).
+// Sin pila (solo USB) o sin divisor la lectura sale fuera de rango y se muestra "--".
+constexpr int BALLENA_BAT_PIN = 10;
+constexpr float BALLENA_BAT_DIVIDER = (100.0f + 30.0f) / 30.0f;   // (R arriba + R abajo) / R abajo
+constexpr float BALLENA_BAT_V_FULL = 9.0f;    // pila nueva
+constexpr float BALLENA_BAT_V_EMPTY = 7.0f;   // abajo de esto el regulador ya no da 5 V estables
+
 static volatile uint32_t lastBallenaBatMs = 0;
 static volatile uint16_t ballenaBatteryMv = 0;
 static volatile uint8_t ballenaBatteryPct = 0;
@@ -103,6 +113,7 @@ static void onEspNowRecv(const esp_now_recv_info_t *info, const uint8_t *data, i
     }
     // 고래 배터리 (EMG ESP32 가 보냄, 어느 MAC 이든 받음)
     if (len == (int)sizeof(BallenaBatMsg) && data[0] == BALLENA_BAT_MAGIC) {
+        if (BALLENA_BAT_PIN >= 0) return;   // se mide en la pantalla: ignorar la del ESP32 EMG
         BallenaBatMsg m;
         memcpy(&m, data, sizeof(m));
         ballenaBatteryMv = m.battery_mv;
@@ -201,7 +212,31 @@ static void createBallenaBattery() {
     }
 }
 
+// Lee la pila en la pantalla cada 0.5 s (promedio de 8 lecturas + filtro para que no brinque)
+static void ballenaBatLocalUpdate() {
+    if (BALLENA_BAT_PIN < 0) return;
+    static uint32_t last = 0;
+    static float vFilt = 0;
+    if (millis() - last < 500) return;
+    last = millis();
+    uint32_t acc = 0;
+    for (int i = 0; i < 8; i++) acc += analogReadMilliVolts(BALLENA_BAT_PIN);
+    const float v = acc / 8 / 1000.0f * BALLENA_BAT_DIVIDER;
+    if (v < 5.0f || v > 11.0f) {   // sin pila (solo USB) o sin divisor → "--" despues del timeout
+        vFilt = 0;
+        return;
+    }
+    vFilt = (vFilt == 0) ? v : vFilt * 0.8f + v * 0.2f;
+    float pct = (vFilt - BALLENA_BAT_V_EMPTY) / (BALLENA_BAT_V_FULL - BALLENA_BAT_V_EMPTY) * 100.0f;
+    if (pct < 0) pct = 0;
+    if (pct > 100) pct = 100;
+    ballenaBatteryMv = (uint16_t)(vFilt * 1000.0f);
+    ballenaBatteryPct = (uint8_t)(pct + 0.5f);
+    lastBallenaBatMs = millis();
+}
+
 static void updateBallenaBattery() {
+    ballenaBatLocalUpdate();
     static int lastShown = -2;
     bool fresh = lastBallenaBatMs != 0 && millis() - lastBallenaBatMs < BATTERY_TIMEOUT_MS;
     int pct = fresh ? ballenaBatteryPct : -1;
@@ -782,6 +817,15 @@ static lv_obj_t *musSlider = NULL;
 static lv_obj_t *musValue = NULL;
 static uint32_t volLastTouchMs = 0;
 
+// Limite real del volumen general: el amplificador se calienta mucho arriba de 70 %.
+// En pantalla se ve 0-100 %, pero 100 % en pantalla = VOL_REAL_MAX % real.
+constexpr int VOL_REAL_MAX = 70;
+static int volUiFromReal(int r) {
+    int u = (r * 100 + VOL_REAL_MAX / 2) / VOL_REAL_MAX;
+    return u > 100 ? 100 : u;
+}
+static int volRealFromUi(int u) { return (u * VOL_REAL_MAX + 50) / 100; }
+
 static const char *volSymbol(uint8_t pct) {
     if (pct == 0) return LV_SYMBOL_MUTE;
     if (pct < 50) return LV_SYMBOL_VOLUME_MID;
@@ -789,7 +833,7 @@ static const char *volSymbol(uint8_t pct) {
 }
 
 static void volRefreshIcons() {
-    const char *s = volSymbol(audioGetVolume());
+    const char *s = volSymbol(volUiFromReal(audioGetVolume()));
     for (int i = 0; i < VOL_N; i++) {
         if (volBtnLabel[i] != NULL) lv_label_set_text(volBtnLabel[i], s);
     }
@@ -802,9 +846,9 @@ static void volClose() {
 
 static void volOpenEvent(lv_event_t *e) {
     if (volBackdrop == NULL) return;
-    lv_slider_set_value(volSlider, audioGetVolume(), LV_ANIM_OFF);
+    lv_slider_set_value(volSlider, volUiFromReal(audioGetVolume()), LV_ANIM_OFF);
     lv_slider_set_value(musSlider, audioGetMusicVolume(), LV_ANIM_OFF);
-    lv_label_set_text_fmt(volValue, "%d%%", audioGetVolume());
+    lv_label_set_text_fmt(volValue, "%d%%", volUiFromReal(audioGetVolume()));
     lv_label_set_text_fmt(musValue, "%d%%", audioGetMusicVolume());
     volRefreshIcons();
     lv_obj_clear_flag(volBackdrop, LV_OBJ_FLAG_HIDDEN);
@@ -821,7 +865,7 @@ static void volSliderChanged(lv_event_t *e) {
     int v = lv_slider_get_value(s);
     volLastTouchMs = millis();
     if (s == volSlider) {
-        audioSetVolume(v);
+        audioSetVolume(volRealFromUi(v));   // pantalla 0-100 % → real 0-70 %
         lv_label_set_text_fmt(volValue, "%d%%", v);
         volRefreshIcons();
     } else {
@@ -1962,8 +2006,13 @@ void setup() {
     Serial.setTxTimeoutMs(0);
 #endif
     audioBegin();
+    if (audioGetVolume() > VOL_REAL_MAX) {   // volumen guardado de antes (hasta 100 %): bajarlo al limite
+        audioSetVolume(VOL_REAL_MAX);
+        audioSaveVolume();
+    }
 
     if (ESTOP_PIN >= 0) pinMode(ESTOP_PIN, INPUT_PULLUP);
+    if (BALLENA_BAT_PIN >= 0) analogSetPinAttenuation(BALLENA_BAT_PIN, ADC_11db);   // hasta ~3.1 V en el pin
 
     // --- ESP-NOW 설정 ---
     // (실패해도 return 하지 않음: 화면은 계속 동작해야 함)
