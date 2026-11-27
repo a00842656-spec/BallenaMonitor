@@ -9,6 +9,7 @@
 #include "motor_protocol.h" // Tortuga XIAO와 동일한 파일 (tortuga-motor-test/src)
 #include "audio.h"           // musica y efectos (conector SPEAKER)
 #include "espejo_web.h"     // pagina del espejo por Wi-Fi (generada de tools/espejo.html)
+#include "espejo_tipos.h"   // struct EspejoSalida (espejo USB / Wi-Fi)
 #include <lwip/sockets.h>
 #include <mbedtls/sha1.h>
 #include <base64.h>
@@ -554,18 +555,7 @@ constexpr uint32_t ESPEJO_US_POR_LOOP = 4000;  // tiempo maximo mandando por vue
 
 static uint16_t *espejoFb = NULL;   // copia de la pantalla en PSRAM (300 KB)
 
-// Una "salida" = un lugar al que se manda la imagen (USB o Wi-Fi). Cada una lleva su propia zona pendiente.
-struct EspejoSalida {
-    const char *nombre;
-    bool on;
-    uint32_t ultimoM;
-    int16_t sucX1, sucY1, sucX2, sucY2;   // zona cambiada, falta mandar (sucX2 < sucX1 = nada)
-    int16_t envX1, envX2, envY, envY2;    // zona que se esta mandando (envY > envY2 = nada)
-    char remBuf[7];                       // toque "X" + 7 caracteres
-    uint8_t remLen;
-    bool remLeyendo;
-    uint32_t remInicioMs;
-};
+// struct EspejoSalida: en espejo_tipos.h (el Arduino IDE necesita los tipos en un .h para sus prototipos)
 static EspejoSalida espUsb = {"USB", false, 0, 0, 0, -1, -1, 0, -1, 0, -1, {0}, 0, false, 0};
 static EspejoSalida espWifi = {"Wi-Fi", false, 0, 0, 0, -1, -1, 0, -1, 0, -1, {0}, 0, false, 0};
 static uint8_t espejoPktUsb[12 + ESPEJO_PKT_PIX_USB * 2 + 2];
