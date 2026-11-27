@@ -27,7 +27,8 @@ Al terminar una sesión la sube a Firestore para la app del fisioterapeuta.
 | `EMG_Emisor/` | ESP32 del circuito EMG (ESP32 DevKit con CH340, entrada en GPIO35): filtros + RMS, manda la envolvente a la pantalla |
 | `Tortuga/` | XIAO ESP32-C6 de la tortuga: motor y batería |
 | `extras/` | `lv_conf.h` y `boards.local.txt` (partición de 12 MB) |
-| `tools/` | `espejo.html` (la pantalla en la computadora, también se puede tocar con el mouse), `mp3_header.py` (sonidos → `.h`), `nube.py` (máscara de la nube) |
+| `espejo_web.h` | La página del espejo por Wi-Fi (generada de `tools/espejo.html`) |
+| `tools/` | `espejo.html` (la pantalla en la computadora, también se puede tocar con el mouse), `web_a_h.py` (`espejo.html` → `espejo_web.h`), `mp3_header.py` (sonidos → `.h`), `nube.py` (máscara de la nube) |
 | `PARA_LA_APP_*.md` | Cómo recibe la app los datos (Wi-Fi propio / Bluetooth) |
 
 ## Instalar (una vez por computadora)
@@ -128,7 +129,8 @@ Seguridad: sin datos de la EMG en 300 ms la señal se toma como cero; la tortuga
 | | `FLECHAS_ACTIVAS`, `ESTOP_PIN` | Flechas manuales; paro por software (`-1` = apagado, el paro es el botón que corta la pila) |
 | | `BALLENA_BAT_PIN`, `BALLENA_BAT_DIVIDER`, `BALLENA_BAT_V_FULL/EMPTY` | Batería de la ballena medida en la pantalla: GPIO10, divisor 100k/30k, 9.0 V = 100 %, 7.0 V = 0 % |
 | | `VOL_REAL_MAX` | Volumen real máximo (70 %) que corresponde al 100 % en pantalla |
-| | `ESPEJO_USB` | Espejo y toque desde la computadora (`false` = apagado) |
+| | `ESPEJO_USB`, `ESPEJO_WIFI` | Espejo y toque desde la computadora por cable / por Wi-Fi (`false` = apagado) |
+| | `ESPEJO_WIFI_SSID`, `ESPEJO_WIFI_PASS` | Red propia del espejo sin cable (canal 1, el mismo de ESP-NOW) |
 | `emg.h` | `EMG_REMOTE` | `true` = la señal llega del ESP32 EMG por ESP-NOW |
 | | `EMG_DEFAULT_THRESHOLD_MV`, `EMG_MIN_ON_MS`, `EMG_CAL_FRACTION` | Umbral inicial (30 mV), tiempo mínimo (200 ms), fracción de CAL |
 | `secrets.h` (no está en GitHub) | `FIRESTORE_WIFI_SSID/PASS` | Hotspot que usa ENVIAR |
@@ -165,7 +167,17 @@ copy secrets.example.h secrets.h     # luego editar secrets.h
 
 ## Espejo en la computadora
 
-Para ver la pantalla en grande (presentaciones, videos, capturas para el reporte):
+Para ver la pantalla en grande (presentaciones, videos, capturas para el reporte), y tocarla con el mouse.
+
+**Sin cable (Wi-Fi):**
+1. En la computadora o el celular, conectarse a la red **`PERLA-Ballena`** (contraseña `perla2026`).
+2. Abrir **http://192.168.4.1** en el navegador. Se conecta solo.
+- Mientras tanto esa computadora no tiene internet (está en la red de la ballena).
+- Durante **ENVIAR** (y unos segundos al encender) la imagen se corta y vuelve sola.
+- Un navegador a la vez. Red, contraseña y encendido: `ESPEJO_WIFI`, `ESPEJO_WIFI_SSID`, `ESPEJO_WIFI_PASS`.
+- Si se cambia `tools/espejo.html`, correr `python tools/web_a_h.py` para actualizar `espejo_web.h` y volver a subir.
+
+**Con cable USB:**
 1. Conectar la pantalla a la computadora con el cable USB.
 2. Abrir `tools/espejo.html` con doble clic en **Chrome o Edge** → **Conectar** → elegir el puerto (COMx).
 
@@ -202,6 +214,8 @@ La nube está dibujada dentro del fondo `ui_img_4_png.c`. Su relleno es una más
 | Batería de la ballena `--` | Normal si está solo con USB. Con pila: revisar el divisor (1.9–2.3 V en el cable amarillo) y `BALLENA_BAT_DIVIDER` |
 | La pantalla se reinicia o se congela sola | Puntas sueltas del arnés tocando algo (aislarlas), o pila de 9 V baja |
 | Espejo: no deja conectar (*Failed to open serial port*) | El puerto lo usa otra pestaña del espejo, el Serial Monitor o una subida en curso |
+| Espejo Wi-Fi: no abre http://192.168.4.1 | La computadora no está en la red `PERLA-Ballena` (a veces Windows se cambia sola a otra red con internet) |
+| ENVIAR falla desde que hay espejo Wi-Fi | Poca RAM interna: probar con `ESPEJO_WIFI = false` |
 | Espejo: conectado pero sin imagen | Esperar 15 s al reinicio. Si sigue, desconectar el cable USB, volver a conectarlo y abrir de nuevo |
 | *text section exceeds available space* | Se compiló sin `PartitionScheme=app12M` |
 | Errores rojos en VS Code pero compila bien | Solo IntelliSense (ver arriba) |

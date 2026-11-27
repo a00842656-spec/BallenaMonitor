@@ -96,7 +96,15 @@ static bool wifiConnect(uint32_t timeoutMs) {
 static void wifiRelease() {
   WiFi.disconnect(false, false);
   vTaskDelay(pdMS_TO_TICKS(200));
-  esp_wifi_set_channel(ESPNOW_CHANNEL, WIFI_SECOND_CHAN_NONE);
+  // Si la pantalla tiene su red propia (espejo Wi-Fi) con alguien conectado, el canal no se puede
+  // cambiar: primero se desconecta a todos (el navegador se vuelve a conectar solo en unos segundos).
+  wifi_mode_t modo;
+  if (esp_wifi_get_mode(&modo) == ESP_OK && modo == WIFI_MODE_APSTA) {
+    esp_wifi_deauth_sta(0);
+    vTaskDelay(pdMS_TO_TICKS(100));
+  }
+  esp_err_t e = esp_wifi_set_channel(ESPNOW_CHANNEL, WIFI_SECOND_CHAN_NONE);
+  if (e != ESP_OK) Serial.printf("[NUBE] no se pudo regresar al canal %u (error %d)\n", ESPNOW_CHANNEL, (int)e);
 }
 
 // Hora por internet. Al final deja la zona horaria de Mexico para la pantalla.

@@ -82,7 +82,9 @@ const $ = (id) => document.getElementById(id);
 const btnCon = $("btnCon"), punto = $("punto"), txtEstado = $("txtEstado"), stats = $("stats");
 const logBox = $("log"), logTxt = $("logTxt");
 
-if (!("serial" in navigator)) {
+// Abierta desde la ballena (http://192.168.4.1) = Wi-Fi; abierta como archivo = cable USB (Web Serial)
+const MODO_WIFI = location.protocol === "http:" || location.protocol === "https:";
+if (!MODO_WIFI && !("serial" in navigator)) {
   $("zona").innerHTML = '<div id="aviso"><b>Este navegador no tiene Web Serial.</b><br>' +
     "Abre este archivo en <b>Google Chrome</b> o <b>Microsoft Edge</b> (en la computadora, no en el celular).</div>";
   btnCon.disabled = true;
@@ -95,7 +97,8 @@ for (let v = 0; v < 65536; v++) {
   lut[v] = 0xFF000000 | (((b << 3) | (b >> 2)) << 16) | (((g << 2) | (g >> 4)) << 8) | ((r << 3) | (r >> 2));
 }
 
-let port = null, reader = null, writer = null, keepTimer = null;
+let port = null, reader = null, writer = null, keepTimer = null, ws = null;
+const conectado = () => MODO_WIFI ? !!(ws && ws.readyState === 1) : !!port;
 let quiereConectado = false;
 let buf = new Uint8Array(1 << 20), len = 0;
 let dx1 = W, dy1 = H, dx2 = -1, dy2 = -1, pintar = false;
@@ -184,6 +187,10 @@ let enviados = 0, erroresTx = 0;
 // abra el Serial, la entrada USB del ESP32-S3 se queda trabada hasta desconectar el cable.
 let puedeEnviar = false, vioArranque = false;
 async function enviar(s) {
+  if (MODO_WIFI) {
+    if (ws && ws.readyState === 1) { ws.send(s); enviados += s.length; }
+    return;
+  }
   if (!port || !puedeEnviar) return;
   try {
     if (!writer && port.writable) writer = port.writable.getWriter();
@@ -314,7 +321,7 @@ function soltar(ev) {
     mandarToque(x, y, false);
   } else if (ultimoToque) mandarToque(ultimoToque[0], ultimoToque[1], false);
 }
-function tactilOn() { return $("chkTactil").checked && port && paquetes > 0; }
+function tactilOn() { return $("chkTactil").checked && conectado() && paquetes > 0; }
 cv.classList.toggle("tactil", $("chkTactil").checked);
 $("chkTactil").onchange = (e) => { cv.classList.toggle("tactil", e.target.checked); soltar(null); };
 cv.addEventListener("pointerdown", (ev) => {
@@ -352,13 +359,44 @@ $("btnFoto").onclick = () => {
 let bytesAntes = 0;
 setInterval(() => {
   const kbs = (bytesRx - bytesAntes) / 1024; bytesAntes = bytesRx;
-  stats.textContent = port ? `${kbs.toFixed(0)} KB/s · ${paquetes} paquetes${malos ? " · " + malos + " con error" : ""} · enviados ${enviados}${erroresTx ? " (" + erroresTx + " fallaron)" : ""}` : "";
+  stats.textContent = conectado() ? `${kbs.toFixed(0)} KB/s · ${paquetes} paquetes${malos ? " · " + malos + " con error" : ""} · enviados ${enviados}${erroresTx ? " (" + erroresTx + " fallaron)" : ""}` : "";
+  if (MODO_WIFI) {
+    if (conectado()) estado(paquetes > 0 && performance.now() - ultimoPaquete < 4000 ? "Conectado por Wi-Fi" : "Conectado por Wi-Fi, esperando imagen…", "ok");
+    return;
+  }
   if (port && paquetes > 0 && performance.now() - ultimoPaquete < 4000) estado("Conectado", "ok");
   else if (port && performance.now() - ultimoPaquete > 4000 && bytesRx > 0 && paquetes === 0)
     estado(performance.now() - conectadoEn < 30000 ? "Conectado, esperando a que la pantalla termine de arrancar…"
                                                     : "Conectado, pero sin imagen: ¿la pantalla tiene el programa nuevo?",
            performance.now() - conectadoEn < 30000 ? "ok" : "bad");
 }, 1000);
+
+// ---- Wi-Fi: la pagina la sirve la ballena; la imagen llega por WebSocket (puerto 81) ----
+function conectarWifi() {
+  estado("Conectando por Wi-Fi…");
+  try { ws = new WebSocket("ws://" + location.hostname + ":81/"); } catch (e) { setTimeout(conectarWifi, 2000); return; }
+  ws.binaryType = "arraybuffer";
+  ws.onopen = () => {
+    conectadoEn = performance.now();
+    len = 0;
+    ws.send("MF");                                   // encender el espejo + mandar todo
+    clearInterval(keepTimer);
+    keepTimer = setInterval(() => enviar(paquetes > 0 && performance.now() - ultimoPaquete < 3000 ? "M" : "MF"), 1000);
+  };
+  ws.onmessage = (ev) => { if (ev.data instanceof ArrayBuffer) agregar(new Uint8Array(ev.data)); };
+  ws.onclose = () => {
+    clearInterval(keepTimer); keepTimer = null;
+    soltar(null);
+    estado("Sin conexión con la ballena: reintentando… (¿sigue conectada la red " + "PERLA-Ballena?)", "bad");
+    setTimeout(conectarWifi, 1500);                  // p. ej. durante ENVIAR se corta unos segundos
+  };
+  ws.onerror = () => { try { ws.close(); } catch (e) {} };
+}
+if (MODO_WIFI) {
+  btnCon.style.display = "none";
+  $("chkLog").parentElement.style.display = "none";   // los mensajes del Serial solo van por cable
+  conectarWifi();
+}
 </script>
 </body>
 </html>

@@ -8,6 +8,11 @@
 #include <esp_wifi.h>
 #include "motor_protocol.h" // Tortuga XIAO와 동일한 파일 (tortuga-motor-test/src)
 #include "audio.h"           // musica y efectos (conector SPEAKER)
+#include "espejo_web.h"     // pagina del espejo por Wi-Fi (generada de tools/espejo.html)
+#include <lwip/sockets.h>
+#include <mbedtls/sha1.h>
+#include <base64.h>
+#include <errno.h>
 #include "emg.h"             // adquisicion sEMG + deteccion de activacion
 #include "emg_panel.h"       // barra / grafica EMG en pantalla
 #include "session_log.h"     // GRABAR / ENVIAR (datos de la sesion)
@@ -530,78 +535,140 @@ constexpr uint32_t DRAW_BUF_LINES = 20;   // 2 x 20 lineas = la misma RAM que an
 static lv_color_t *drawBuf1 = NULL;
 static lv_color_t *drawBuf2 = NULL;
 
-// ============ ESPEJO DE PANTALLA POR USB ============
-// La misma imagen de la pantalla, en grande, en la computadora conectada por el cable USB.
-// En la computadora: abrir tools/espejo.html en Chrome o Edge → Conectar → elegir el puerto.
-// Solo manda imagen mientras esa pagina esta abierta (la pagina manda 'M' cada segundo);
-// sin la pagina no cambia nada. Antes de subir el programa, cerrar la pagina (usa el puerto).
+// ============ ESPEJO DE PANTALLA (USB y Wi-Fi) ============
+// La misma imagen de la pantalla, en grande, en la computadora; con clic = tocar.
+//  - Por cable USB: abrir tools/espejo.html en Chrome o Edge → Conectar → elegir el puerto.
+//  - Sin cable (Wi-Fi): conectar la computadora o el celular a la red ESPEJO_WIFI_SSID y abrir
+//    http://192.168.4.1 en el navegador (la pantalla sirve la misma pagina).
+// Solo manda imagen mientras la pagina esta abierta (la pagina manda 'M' cada segundo).
 // Paquete: "LVM1" + x,y,w,h (uint16) + w*h pixeles RGB565 + suma (uint16), todo little-endian.
-constexpr bool ESPEJO_USB = true;              // false = apagado del todo
+constexpr bool ESPEJO_USB = true;              // false = sin espejo por cable
+constexpr bool ESPEJO_WIFI = true;             // false = sin red Wi-Fi propia ni espejo inalambrico
+#define ESPEJO_WIFI_SSID "PERLA-Ballena"
+#define ESPEJO_WIFI_PASS "perla2026"           // minimo 8 caracteres
 constexpr uint32_t ESPEJO_TIMEOUT_MS = 3000;   // sin 'M' en este tiempo → se apaga solo
 constexpr uint32_t ESPEJO_TX_BUFFER = 4096;    // buffer de salida del USB (RAM interna)
-constexpr uint32_t ESPEJO_PKT_PIX = 960;       // pixeles por paquete (2 filas de 480)
-constexpr uint32_t ESPEJO_US_POR_LOOP = 4000;  // tiempo maximo mandando por vuelta del loop
+constexpr uint32_t ESPEJO_PKT_PIX_USB = 960;   // pixeles por paquete por USB (2 filas de 480)
+constexpr uint32_t ESPEJO_PKT_PIX_WIFI = 3840; // por Wi-Fi (8 filas)
+constexpr uint32_t ESPEJO_US_POR_LOOP = 4000;  // tiempo maximo mandando por vuelta del loop (cada salida)
 
 static uint16_t *espejoFb = NULL;   // copia de la pantalla en PSRAM (300 KB)
-static bool espejoOn = false;
-static uint32_t espejoUltimoM = 0;
-static int16_t espSucX1 = 0, espSucY1 = 0, espSucX2 = -1, espSucY2 = -1;   // zona cambiada, falta mandar
-static int16_t espEnvX1 = 0, espEnvX2 = -1, espEnvY = 0, espEnvY2 = -1;    // zona que se esta mandando
-static uint8_t espejoPkt[12 + ESPEJO_PKT_PIX * 2 + 2];
 
-static void espejoMarcar(int16_t x1, int16_t y1, int16_t x2, int16_t y2) {
-    if (espSucX2 < espSucX1) {
-        espSucX1 = x1; espSucY1 = y1; espSucX2 = x2; espSucY2 = y2;
+// Una "salida" = un lugar al que se manda la imagen (USB o Wi-Fi). Cada una lleva su propia zona pendiente.
+struct EspejoSalida {
+    const char *nombre;
+    bool on;
+    uint32_t ultimoM;
+    int16_t sucX1, sucY1, sucX2, sucY2;   // zona cambiada, falta mandar (sucX2 < sucX1 = nada)
+    int16_t envX1, envX2, envY, envY2;    // zona que se esta mandando (envY > envY2 = nada)
+    char remBuf[7];                       // toque "X" + 7 caracteres
+    uint8_t remLen;
+    bool remLeyendo;
+    uint32_t remInicioMs;
+};
+static EspejoSalida espUsb = {"USB", false, 0, 0, 0, -1, -1, 0, -1, 0, -1, {0}, 0, false, 0};
+static EspejoSalida espWifi = {"Wi-Fi", false, 0, 0, 0, -1, -1, 0, -1, 0, -1, {0}, 0, false, 0};
+static uint8_t espejoPktUsb[12 + ESPEJO_PKT_PIX_USB * 2 + 2];
+
+static inline bool espejoAlgunoOn() { return espUsb.on || espWifi.on; }
+
+static void espejoMarcar(EspejoSalida &s, int16_t x1, int16_t y1, int16_t x2, int16_t y2) {
+    if (s.sucX2 < s.sucX1) {
+        s.sucX1 = x1; s.sucY1 = y1; s.sucX2 = x2; s.sucY2 = y2;
     } else {
-        if (x1 < espSucX1) espSucX1 = x1;
-        if (y1 < espSucY1) espSucY1 = y1;
-        if (x2 > espSucX2) espSucX2 = x2;
-        if (y2 > espSucY2) espSucY2 = y2;
+        if (x1 < s.sucX1) s.sucX1 = x1;
+        if (y1 < s.sucY1) s.sucY1 = y1;
+        if (x2 > s.sucX2) s.sucX2 = x2;
+        if (y2 > s.sucY2) s.sucY2 = y2;
     }
 }
 
-// se llama desde my_disp_flush: copia el pedazo dibujado (rapido, sin USB)
+// se llama desde my_disp_flush: copia el pedazo dibujado (rapido, sin mandar nada)
 static inline void espejoCopiar(const lv_area_t *a, const lv_color_t *src) {
-    if (!espejoOn || espejoFb == NULL) return;
+    if (!espejoAlgunoOn() || espejoFb == NULL) return;
     if (a->x1 < 0 || a->y1 < 0 || a->x2 >= screenWidth || a->y2 >= screenHeight) return;
     const int16_t w = a->x2 - a->x1 + 1;
     const uint16_t *s = (const uint16_t *)src;
     for (int16_t y = a->y1; y <= a->y2; y++, s += w) {
         memcpy(&espejoFb[(uint32_t)y * screenWidth + a->x1], s, w * 2);
     }
-    espejoMarcar(a->x1, a->y1, a->x2, a->y2);
+    if (espUsb.on) espejoMarcar(espUsb, a->x1, a->y1, a->x2, a->y2);
+    if (espWifi.on) espejoMarcar(espWifi, a->x1, a->y1, a->x2, a->y2);
 }
 
-static void espejoApagar() {
-    espejoOn = false;
-    espSucX2 = -1; espSucX1 = 0;
-    espEnvY2 = -1; espEnvY = 0;
+static void espejoEncender(EspejoSalida &s) {
+    if (s.on || espejoFb == NULL) return;
+    const bool otraYaOn = espejoAlgunoOn();
+    s.on = true;
+    s.sucX2 = -1; s.sucX1 = 0; s.envY2 = -1; s.envY = 0;
+    if (otraYaOn) espejoMarcar(s, 0, 0, screenWidth - 1, screenHeight - 1);   // la copia ya esta al dia
+    else lv_obj_invalidate(lv_scr_act());   // redibuja todo → la copia queda completa
+    Serial.printf("[ESPEJO] encendido (%s)\n", s.nombre);
 }
 
-// comandos de la pagina (llegan por emgSerialUpdate): M = encender / sigo aqui, m = apagar, F = todo otra vez
-// ---- Toque desde la computadora (clic en tools/espejo.html) ----
+static void espejoApagar(EspejoSalida &s) {
+    if (s.on) Serial.printf("[ESPEJO] apagado (%s)\n", s.nombre);
+    s.on = false;
+    s.sucX2 = -1; s.sucX1 = 0;
+    s.envY2 = -1; s.envY = 0;
+    s.remLeyendo = false;
+}
+
+// Arma el siguiente paquete de la zona pendiente en buf. Regresa su tamano (0 = nada que mandar).
+// maxBytes: lo que cabe ahora en la salida (si el paquete no cabe, no se arma).
+static size_t espejoArmar(EspejoSalida &s, uint8_t *buf, uint32_t maxPix, size_t maxBytes) {
+    if (s.envY > s.envY2) {                 // termino la zona anterior: tomar la nueva
+        if (s.sucX2 < s.sucX1) return 0;    // nada que mandar
+        s.envX1 = s.sucX1; s.envX2 = s.sucX2;
+        s.envY = s.sucY1;  s.envY2 = s.sucY2;
+        s.sucX2 = -1; s.sucX1 = 0;
+    }
+    const uint16_t w = s.envX2 - s.envX1 + 1;
+    uint16_t rows = maxPix / w;
+    if (rows < 1) rows = 1;
+    if (rows > s.envY2 - s.envY + 1) rows = s.envY2 - s.envY + 1;
+    const size_t nPix = (size_t)w * rows;
+    const size_t n = 12 + nPix * 2 + 2;
+    if (n > maxBytes) return 0;
+
+    buf[0] = 'L'; buf[1] = 'V'; buf[2] = 'M'; buf[3] = '1';
+    const uint16_t hdr[4] = {(uint16_t)s.envX1, (uint16_t)s.envY, w, rows};
+    memcpy(buf + 4, hdr, 8);
+    uint16_t *px = (uint16_t *)(buf + 12);
+    uint16_t suma = 0;
+    for (uint16_t r = 0; r < rows; r++) {
+        const uint16_t *src = &espejoFb[(uint32_t)(s.envY + r) * screenWidth + s.envX1];
+        for (uint16_t i = 0; i < w; i++) {
+            const uint16_t v = src[i];
+            *px++ = v;
+            suma += v;
+        }
+    }
+    memcpy(buf + 12 + nPix * 2, &suma, 2);
+    s.envY += rows;
+    return n;
+}
+
+// ---- Toque desde la computadora (clic en la imagen del espejo) ----
 // La pagina manda "X" + x (3 cifras) + y (3 cifras) + "1" (presionado) o "0" (suelto), p. ej. "X2401601".
 // Mientras se mantiene presionado lo repite cada 150 ms; sin repeticion en 400 ms se suelta solo
-// (por si se cierra la pagina con el boton presionado). Solo funciona con el espejo encendido.
+// (por si se cierra la pagina o se pierde la conexion con el boton presionado).
 constexpr uint32_t ESPEJO_TOQUE_TIMEOUT_MS = 400;
 static bool remTouchPressed = false;
 static int16_t remTouchX = 0, remTouchY = 0;
 static uint32_t remTouchMs = 0;
 static uint32_t remMinHasta = 0;   // un clic rapido se mantiene al menos 80 ms (LVGL lee el toque cada 30 ms)
-static char remBuf[7];
-static uint8_t remLen = 0;
-static bool remLeyendo = false;
-static uint32_t remInicioMs = 0;
 
-static void remTouchParse() {
-    for (int i = 0; i < 6; i++) if (remBuf[i] < '0' || remBuf[i] > '9') return;
-    if (remBuf[6] != '0' && remBuf[6] != '1') return;
-    const int x = (remBuf[0] - '0') * 100 + (remBuf[1] - '0') * 10 + (remBuf[2] - '0');
-    const int y = (remBuf[3] - '0') * 100 + (remBuf[4] - '0') * 10 + (remBuf[5] - '0');
-    if (x >= screenWidth || y >= screenHeight || !espejoOn) return;
+static void remTouchParse(const EspejoSalida &s) {
+    const char *b = s.remBuf;
+    for (int i = 0; i < 6; i++) if (b[i] < '0' || b[i] > '9') return;
+    if (b[6] != '0' && b[6] != '1') return;
+    const int x = (b[0] - '0') * 100 + (b[1] - '0') * 10 + (b[2] - '0');
+    const int y = (b[3] - '0') * 100 + (b[4] - '0') * 10 + (b[5] - '0');
+    if (x >= screenWidth || y >= screenHeight || !s.on) return;
     remTouchX = x;
     remTouchY = y;
-    const bool pr = remBuf[6] == '1';
+    const bool pr = b[6] == '1';
     if (pr && !remTouchPressed) remMinHasta = millis() + 80;
     remTouchPressed = pr;
     remTouchMs = millis();
@@ -609,7 +676,7 @@ static void remTouchParse() {
 
 // lo usa my_touchpad_read: true = la computadora esta "tocando" la pantalla
 static bool remTouchActive(int16_t *x, int16_t *y) {
-    if (!espejoOn) return false;
+    if (!espejoAlgunoOn()) return false;
     const bool sostenido = remTouchPressed && millis() - remTouchMs <= ESPEJO_TOQUE_TIMEOUT_MS;
     const bool clicCorto = (int32_t)(remMinHasta - millis()) > 0;
     if (!sostenido && !clicCorto) return false;
@@ -618,88 +685,228 @@ static bool remTouchActive(int16_t *x, int16_t *y) {
     return true;
 }
 
-bool mirrorSerialCommand(char c) {
-    if (!ESPEJO_USB) return false;
-    if (remLeyendo) {
-        if (millis() - remInicioMs > 200) {
-            remLeyendo = false;   // mensaje incompleto: se descarta y este caracter se procesa normal
+// Comandos de la pagina: M = encender / sigo aqui, m = apagar, F = todo otra vez, X... = toque
+static bool espejoComando(EspejoSalida &s, char c) {
+    if (s.remLeyendo) {
+        if (millis() - s.remInicioMs > 200) {
+            s.remLeyendo = false;   // mensaje incompleto: se descarta y este caracter se procesa normal
         } else {
-            remBuf[remLen++] = c;
-            if (remLen == sizeof(remBuf)) {
-                remLeyendo = false;
-                remTouchParse();
+            s.remBuf[s.remLen++] = c;
+            if (s.remLen == sizeof(s.remBuf)) {
+                s.remLeyendo = false;
+                remTouchParse(s);
             }
             return true;
         }
     }
     if (c == 'X') {
-        remLeyendo = true;
-        remLen = 0;
-        remInicioMs = millis();
+        s.remLeyendo = true;
+        s.remLen = 0;
+        s.remInicioMs = millis();
         return true;
     }
     if (c == 'M') {
-        if (!espejoOn && espejoFb != NULL) {
-            espejoOn = true;
-            lv_obj_invalidate(lv_scr_act());   // redibuja todo → la copia queda completa
-            Serial.println("[ESPEJO] encendido");
-        }
-        espejoUltimoM = millis();
+        espejoEncender(s);
+        s.ultimoM = millis();
         return true;
     }
     if (c == 'F') {
-        if (espejoOn) espejoMarcar(0, 0, screenWidth - 1, screenHeight - 1);
+        if (s.on) espejoMarcar(s, 0, 0, screenWidth - 1, screenHeight - 1);
         return true;
     }
     if (c == 'm') {
-        if (espejoOn) Serial.println("[ESPEJO] apagado");
-        espejoApagar();
+        espejoApagar(s);
         return true;
     }
     return false;
 }
 
-// en el loop: manda lo que cambio, por pedazos, solo si cabe en el buffer (nunca detiene la pantalla)
-void espejoUpdate() {
-    if (!ESPEJO_USB || !espejoOn) return;
-    if (millis() - espejoUltimoM > ESPEJO_TIMEOUT_MS) {   // se cerro la pagina
-        espejoApagar();
+// los llama emgSerialUpdate con cada caracter que llega por el USB
+bool mirrorSerialCommand(char c) {
+    if (!ESPEJO_USB) return false;
+    return espejoComando(espUsb, c);
+}
+
+// USB: manda lo que cambio, por pedazos, solo si cabe en el buffer (nunca detiene la pantalla)
+static void espejoUsbUpdate() {
+    if (!ESPEJO_USB || !espUsb.on) return;
+    if (millis() - espUsb.ultimoM > ESPEJO_TIMEOUT_MS) {   // se cerro la pagina
+        espejoApagar(espUsb);
         return;
     }
     const uint32_t t0 = micros();
     while (micros() - t0 < ESPEJO_US_POR_LOOP) {
-        if (espEnvY > espEnvY2) {                 // termino la zona anterior: tomar la nueva
-            if (espSucX2 < espSucX1) return;      // nada que mandar
-            espEnvX1 = espSucX1; espEnvX2 = espSucX2;
-            espEnvY = espSucY1;  espEnvY2 = espSucY2;
-            espSucX2 = -1; espSucX1 = 0;
-        }
-        const uint16_t w = espEnvX2 - espEnvX1 + 1;
-        uint16_t rows = ESPEJO_PKT_PIX / w;
-        if (rows < 1) rows = 1;
-        if (rows > espEnvY2 - espEnvY + 1) rows = espEnvY2 - espEnvY + 1;
-        const size_t nPix = (size_t)w * rows;
-        const size_t n = 12 + nPix * 2 + 2;
-        if (Serial.availableForWrite() < (int)(n + 256)) return;   // deja lugar para los textos del Serial
-
-        uint8_t *p = espejoPkt;
-        p[0] = 'L'; p[1] = 'V'; p[2] = 'M'; p[3] = '1';
-        const uint16_t hdr[4] = {(uint16_t)espEnvX1, (uint16_t)espEnvY, w, rows};
-        memcpy(p + 4, hdr, 8);
-        uint16_t *px = (uint16_t *)(p + 12);
-        uint16_t suma = 0;
-        for (uint16_t r = 0; r < rows; r++) {
-            const uint16_t *src = &espejoFb[(uint32_t)(espEnvY + r) * screenWidth + espEnvX1];
-            for (uint16_t i = 0; i < w; i++) {
-                const uint16_t v = src[i];
-                *px++ = v;
-                suma += v;
-            }
-        }
-        memcpy(p + 12 + nPix * 2, &suma, 2);
-        Serial.write(p, n);
-        espEnvY += rows;
+        const int libre = Serial.availableForWrite() - 256;   // deja lugar para los textos del Serial
+        if (libre <= 0) return;
+        const size_t n = espejoArmar(espUsb, espejoPktUsb, ESPEJO_PKT_PIX_USB, (size_t)libre);
+        if (n == 0) return;
+        Serial.write(espejoPktUsb, n);
     }
+}
+
+// ---- Wi-Fi: red propia + pagina (puerto 80) + WebSocket (puerto 81) ----
+// Un solo navegador a la vez (el ultimo que se conecta). La imagen va en mensajes binarios
+// (un paquete "LVM1" por mensaje); los comandos llegan como texto ("M", "F", "X2401601").
+static WiFiServer espWebServer(80);
+static WiFiServer espWsServer(81);
+static WiFiClient espWsCli;
+static bool espWifiListo = false;
+static uint8_t *espWsTx = NULL;           // [4 bytes de cabecera WebSocket][paquete], en PSRAM
+static size_t espWsTxLen = 0, espWsTxOff = 0;
+static uint8_t espWsRx[256];
+static size_t espWsRxLen = 0;
+static const size_t ESP_WS_TX_BYTES = 4 + 12 + ESPEJO_PKT_PIX_WIFI * 2 + 2;
+
+void espejoWifiBegin() {
+    if (!ESPEJO_WIFI) return;
+    espWsTx = (uint8_t *)heap_caps_malloc(ESP_WS_TX_BYTES, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (espWsTx == NULL) return;
+    // mismo canal que ESP-NOW: la tortuga y la EMG siguen funcionando
+    if (!WiFi.softAP(ESPEJO_WIFI_SSID, ESPEJO_WIFI_PASS, ESPNOW_CHANNEL, 0, 2)) {
+        Serial.println("[ESPEJO] no se pudo crear la red Wi-Fi");
+        return;
+    }
+    espWebServer.begin();
+    espWsServer.begin();
+    espWifiListo = true;
+    Serial.printf("[ESPEJO] Wi-Fi: red '%s' → abrir http://%s\n", ESPEJO_WIFI_SSID,
+                  WiFi.softAPIP().toString().c_str());
+}
+
+static void espWsCerrar() {
+    if (espWsCli) espWsCli.stop();
+    espWsTxLen = espWsTxOff = 0;
+    espWsRxLen = 0;
+    espejoApagar(espWifi);
+}
+
+// Lee la peticion HTTP (encabezados) con un tiempo maximo. Regresa false si no llego completa.
+static bool espLeerEncabezados(WiFiClient &c, String &req, uint32_t timeoutMs) {
+    const uint32_t t0 = millis();
+    while (millis() - t0 < timeoutMs && req.length() < 2048) {
+        while (c.available()) {
+            req += (char)c.read();
+            if (req.endsWith("\r\n\r\n")) return true;
+        }
+        if (!c.connected()) return false;
+        delay(1);
+    }
+    return false;
+}
+
+static void espWebAtender() {
+    WiFiClient c = espWebServer.accept();
+    if (!c) return;
+    String req;
+    espLeerEncabezados(c, req, 300);
+    if (req.startsWith("GET / ") || req.startsWith("GET /index")) {
+        const size_t len = strlen_P(ESPEJO_HTML);
+        c.printf("HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: %u\r\n"
+                 "Cache-Control: no-store\r\nConnection: close\r\n\r\n", (unsigned)len);
+        for (size_t off = 0; off < len && c.connected();) {
+            const size_t n = (len - off) > 1024 ? 1024 : (len - off);
+            const size_t w = c.write((const uint8_t *)ESPEJO_HTML + off, n);
+            if (w == 0) break;
+            off += w;
+        }
+    } else {
+        c.print("HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+    }
+    c.stop();
+}
+
+static void espWsAceptar() {
+    WiFiClient c = espWsServer.accept();
+    if (!c) return;
+    String req;
+    if (!espLeerEncabezados(c, req, 500)) { c.stop(); return; }
+    int k = req.indexOf("Sec-WebSocket-Key:");
+    if (k < 0) k = req.indexOf("sec-websocket-key:");
+    if (k < 0) { c.stop(); return; }
+    int fin = req.indexOf("\r\n", k);
+    String key = req.substring(k + 18, fin);
+    key.trim();
+    key += "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
+    uint8_t sha[20];
+    mbedtls_sha1((const unsigned char *)key.c_str(), key.length(), sha);
+    String acc = base64::encode(sha, 20);
+    c.print("HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n"
+            "Sec-WebSocket-Accept: " + acc + "\r\n\r\n");
+    if (espWsCli) espWsCerrar();   // solo un navegador: el nuevo reemplaza al anterior
+    espWsCli = c;
+    espWsCli.setNoDelay(true);
+    espWsTxLen = espWsTxOff = 0;
+    espWsRxLen = 0;
+    Serial.println("[ESPEJO] navegador conectado por Wi-Fi");
+}
+
+// Mensajes del navegador (con mascara, como manda el estandar). Solo texto corto.
+static void espWsLeer() {
+    while (espWsCli.available() && espWsRxLen < sizeof(espWsRx)) espWsRx[espWsRxLen++] = espWsCli.read();
+    for (;;) {
+        if (espWsRxLen < 2) return;
+        const uint8_t op = espWsRx[0] & 0x0F;
+        const bool mask = espWsRx[1] & 0x80;
+        size_t len = espWsRx[1] & 0x7F, h = 2;
+        if (len == 126) {
+            if (espWsRxLen < 4) return;
+            len = ((size_t)espWsRx[2] << 8) | espWsRx[3];
+            h = 4;
+        } else if (len == 127) { espWsCerrar(); return; }
+        if (mask) h += 4;
+        if (h + len > sizeof(espWsRx)) { espWsCerrar(); return; }   // mensaje demasiado grande
+        if (espWsRxLen < h + len) return;
+        uint8_t *pl = espWsRx + h;
+        if (mask) for (size_t i = 0; i < len; i++) pl[i] ^= espWsRx[h - 4 + (i & 3)];
+        if (op == 0x8) { espWsCerrar(); return; }                    // el navegador cerro
+        if (op == 0x1 || op == 0x2) for (size_t i = 0; i < len; i++) espejoComando(espWifi, (char)pl[i]);
+        memmove(espWsRx, espWsRx + h + len, espWsRxLen - h - len);
+        espWsRxLen -= h + len;
+    }
+}
+
+// Manda sin esperar: si el Wi-Fi esta ocupado, sigue en la siguiente vuelta del loop
+static void espWsMandar() {
+    if (!espWifi.on) return;
+    if (millis() - espWifi.ultimoM > ESPEJO_TIMEOUT_MS) { espWsCerrar(); return; }
+    const int fd = espWsCli.fd();
+    if (fd < 0) { espWsCerrar(); return; }
+    const uint32_t t0 = micros();
+    while (micros() - t0 < ESPEJO_US_POR_LOOP) {
+        if (espWsTxOff >= espWsTxLen) {   // armar el siguiente paquete
+            const size_t n = espejoArmar(espWifi, espWsTx + 4, ESPEJO_PKT_PIX_WIFI, ESP_WS_TX_BYTES - 4);
+            if (n == 0) return;
+            espWsTx[0] = 0x82;            // mensaje binario completo
+            espWsTx[1] = 126;
+            espWsTx[2] = (uint8_t)(n >> 8);
+            espWsTx[3] = (uint8_t)n;
+            espWsTxLen = n + 4;
+            espWsTxOff = 0;
+        }
+        const int w = lwip_send(fd, espWsTx + espWsTxOff, espWsTxLen - espWsTxOff, MSG_DONTWAIT);
+        if (w > 0) {
+            espWsTxOff += w;
+        } else {
+            if (w < 0 && errno != EAGAIN && errno != EWOULDBLOCK) espWsCerrar();
+            return;
+        }
+    }
+}
+
+static void espejoWifiUpdate() {
+    if (!espWifiListo) return;
+    espWebAtender();
+    espWsAceptar();
+    if (!espWsCli) return;
+    if (!espWsCli.connected()) { espWsCerrar(); return; }
+    espWsLeer();
+    if (espWsCli) espWsMandar();
+}
+
+// en el loop
+void espejoUpdate() {
+    espejoUsbUpdate();
+    espejoWifiUpdate();
 }
 // ==========================================
 
@@ -2079,7 +2286,8 @@ void setup() {
     // --- ESP-NOW 설정 ---
     // (실패해도 return 하지 않음: 화면은 계속 동작해야 함)
     // STA = ESP-NOW (tortuga y ESP32 EMG). AP = red Wi-Fi propia para la app (solo si SESSION_WIFI_AP)
-    WiFi.mode(SESSION_WIFI_AP ? WIFI_AP_STA : WIFI_STA);
+    // (no activar SESSION_WIFI_AP y ESPEJO_WIFI a la vez: las dos crean una red propia)
+    WiFi.mode((SESSION_WIFI_AP || ESPEJO_WIFI) ? WIFI_AP_STA : WIFI_STA);
     WiFi.disconnect();
     esp_wifi_set_channel(ESPNOW_CHANNEL, WIFI_SECOND_CHAN_NONE); // mismo canal que el XIAO
     if (esp_now_init() != ESP_OK) {
@@ -2095,6 +2303,7 @@ void setup() {
         }
     }
     // --- ESP-NOW 설정 끝 ---
+    espejoWifiBegin();   // red "PERLA-Ballena" para el espejo sin cable (antes de firestoreBegin)
 
     // Red Wi-Fi propia + servidor de datos (mismo canal que ESP-NOW)
     sessionLogBegin();
@@ -2131,7 +2340,7 @@ void setup() {
     }
     Serial.printf("[PANTALLA] buffers: %s, RAM interna libre %u bytes\n", drawBuf2 ? "2 + DMA" : "1",
                   (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
-    if (ESPEJO_USB) {   // copia de la pantalla para el espejo USB: en PSRAM, no gasta RAM interna
+    if (ESPEJO_USB || ESPEJO_WIFI) {   // copia de la pantalla para el espejo: en PSRAM, no gasta RAM interna
         espejoFb = (uint16_t *)heap_caps_malloc(screenWidth * screenHeight * 2, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
         Serial.println(espejoFb ? "[ESPEJO] listo: abrir tools/espejo.html en la computadora"
                                 : "[ESPEJO] sin PSRAM: espejo apagado");
