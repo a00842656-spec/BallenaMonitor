@@ -885,8 +885,12 @@ static void espejoWifiTask(void *);
 
 void espejoWifiBegin() {
     if (!ESPEJO_WIFI) return;
-    espWsTx = (uint8_t *)heap_caps_malloc(ESP_WS_TX_BYTES, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-    espWsTmp = (uint16_t *)heap_caps_malloc(ESPEJO_PKT_PIX_WIFI * 2, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    // en RAM interna (8 KB): asi la tarea Wi-Fi casi no usa la PSRAM, que comparte el bus con la flash
+    // donde estan las imagenes de la pantalla (si no, la pantalla se pone lenta mientras se manda)
+    espWsTx = (uint8_t *)heap_caps_malloc(ESP_WS_TX_BYTES, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    espWsTmp = (uint16_t *)heap_caps_malloc(ESPEJO_PKT_PIX_WIFI * 2, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    if (espWsTx == NULL) espWsTx = (uint8_t *)heap_caps_malloc(ESP_WS_TX_BYTES, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (espWsTmp == NULL) espWsTmp = (uint16_t *)heap_caps_malloc(ESPEJO_PKT_PIX_WIFI * 2, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     if (espWsTx == NULL || espWsTmp == NULL) { Serial.println("[ESPEJO] Wi-Fi: sin memoria (PSRAM)"); return; }
     // mismo canal que ESP-NOW: la tortuga y la EMG siguen funcionando
     if (!WiFi.softAP(ESPEJO_WIFI_SSID, ESPEJO_WIFI_PASS, ESPNOW_CHANNEL, 0, 2)) {
@@ -1073,6 +1077,7 @@ static void espWsMandar() {
         }
         espWsLeer();
         if (!espWsAbierto) return;
+        vTaskDelay(1);   // dejar respirar al bus de memoria: la pantalla tiene prioridad
     }
 }
 
