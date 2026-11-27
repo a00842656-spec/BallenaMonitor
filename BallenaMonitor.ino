@@ -11,6 +11,7 @@
 #include "espejo_web.h"     // pagina del espejo por Wi-Fi (generada de tools/espejo.html)
 #include "espejo_tipos.h"   // struct EspejoSalida (espejo USB / Wi-Fi)
 #include <lwip/sockets.h>
+#include <DNSServer.h>
 #include <mbedtls/sha1.h>
 #include <base64.h>
 #include <errno.h>
@@ -545,6 +546,7 @@ static lv_color_t *drawBuf2 = NULL;
 // Paquetes (little-endian):
 //   "LVM1" + x,y,w,h (uint16) + w*h pixeles RGB565 + suma (uint16)                  (USB)
 //   "LVR1" + x,y,w,h (uint16) + largo (uint16) + pixeles comprimidos + suma (uint16)  (Wi-Fi)
+//   "LVQ1" = igual que LVR1 pero con 1 pixel por cada 2x2 (Wi-Fi en modo rapido, comando 'H'; 'h' = completo)
 //   Compresion (tipo PackBits): byte n < 128 → siguen n+1 pixeles; n >= 128 → el siguiente pixel se repite n-126 veces.
 //   La suma es la de los pixeles ya descomprimidos.
 // Por Wi-Fi todo se manda desde una tarea aparte (nucleo 0), asi la pantalla nunca espera a la red.
@@ -555,7 +557,8 @@ constexpr bool ESPEJO_WIFI = true;             // false = sin red Wi-Fi propia n
 constexpr uint32_t ESPEJO_TIMEOUT_MS = 3000;   // sin 'M' en este tiempo → se apaga solo
 constexpr uint32_t ESPEJO_TX_BUFFER = 4096;    // buffer de salida del USB (RAM interna)
 constexpr uint32_t ESPEJO_PKT_PIX_USB = 960;   // pixeles por paquete por USB (2 filas de 480)
-constexpr uint32_t ESPEJO_PKT_PIX_WIFI = 7680; // por Wi-Fi (16 filas de 480, antes de comprimir)
+constexpr uint32_t ESPEJO_PKT_PIX_WIFI = 1920; // por Wi-Fi (4 filas de 480, antes de comprimir): paquetes chicos = los clics no esperan
+constexpr uint32_t ESPEJO_TIMEOUT_WIFI_MS = 10000;   // Wi-Fi lento: dar mas tiempo antes de cortar
 constexpr uint32_t ESPEJO_US_POR_LOOP = 4000;  // USB: tiempo maximo mandando por vuelta del loop
 
 static uint16_t *espejoFb = NULL;   // copia de la pantalla en PSRAM (300 KB)
@@ -565,6 +568,7 @@ static EspejoSalida espWifi = {"Wi-Fi", false, 0, {}, 0, 0, -1, 0, -1, {0}, 0, f
 static uint8_t espejoPktUsb[12 + ESPEJO_PKT_PIX_USB * 2 + 2];
 static portMUX_TYPE espMux = portMUX_INITIALIZER_UNLOCKED;   // zonas compartidas entre el loop y la tarea Wi-Fi
 static volatile bool espPedirRedibujo = false;              // lv_obj_invalidate solo desde el loop (LVGL)
+static volatile bool espWifiMitad = true;   // Wi-Fi "rapido": manda 1 de cada 2x2 pixeles (4 veces menos datos)
 
 static inline bool espejoAlgunoOn() { return espUsb.on || espWifi.on; }
 
@@ -703,19 +707,34 @@ static size_t espejoArmar(EspejoSalida &s, uint8_t *buf, uint32_t maxPix, size_t
     return n;
 }
 
-// Paquete comprimido ("LVR1"). tmp: espacio para maxPix pixeles. buf: 14 + maxPix*2 + maxPix/128 + 3 bytes.
-static size_t espejoArmarRle(EspejoSalida &s, uint8_t *buf, uint16_t *tmp, uint32_t maxPix) {
+// Paquete comprimido. tmp: espacio para maxPix pixeles. buf: 14 + maxPix*2 + maxPix/128 + 3 bytes.
+//   mitad = false → "LVR1": todos los pixeles de la zona.
+//   mitad = true  → "LVQ1": la zona se agranda a coordenadas pares y se manda 1 pixel por cada cuadro de 2x2
+//                   (x,y,w,h siguen en pixeles de la pantalla; el navegador pinta cada pixel como 2x2).
+static size_t espejoArmarRle(EspejoSalida &s, uint8_t *buf, uint16_t *tmp, uint32_t maxPix, bool mitad) {
     if (!espejoSiguienteZona(s)) return 0;
-    const uint16_t w = s.envX2 - s.envX1 + 1;
-    uint16_t rows = maxPix / w;
-    if (rows < 1) rows = 1;
-    if (rows > s.envY2 - s.envY + 1) rows = s.envY2 - s.envY + 1;
-    const size_t nPix = (size_t)w * rows;
-
-    uint16_t suma = 0;
-    for (uint16_t r = 0; r < rows; r++) {   // copiar ya (la pantalla puede seguir cambiando)
-        memcpy(tmp + (size_t)r * w, &espejoFb[(uint32_t)(s.envY + r) * screenWidth + s.envX1], w * 2);
+    if (mitad) {   // alinear a pares
+        s.envX1 &= ~1; s.envY &= ~1;
+        s.envX2 |= 1;  s.envY2 |= 1;
+        if (s.envX2 >= screenWidth) s.envX2 = screenWidth - 1;
+        if (s.envY2 >= screenHeight) s.envY2 = screenHeight - 1;
     }
+    const uint16_t w = s.envX2 - s.envX1 + 1;
+    const uint16_t pw = mitad ? w / 2 : w;            // pixeles por fila que se mandan
+    uint16_t rows = (mitad ? maxPix * 2 : maxPix) / w;  // filas de pantalla por paquete
+    if (mitad) rows &= ~1;
+    if (rows < (mitad ? 2 : 1)) rows = mitad ? 2 : 1;
+    if (rows > s.envY2 - s.envY + 1) rows = s.envY2 - s.envY + 1;
+    const uint16_t prows = mitad ? rows / 2 : rows;
+    const size_t nPix = (size_t)pw * prows;
+
+    for (uint16_t r = 0; r < prows; r++) {   // copiar ya (la pantalla puede seguir cambiando)
+        const uint16_t *src = &espejoFb[(uint32_t)(s.envY + (mitad ? r * 2 : r)) * screenWidth + s.envX1];
+        uint16_t *dst = tmp + (size_t)r * pw;
+        if (mitad) for (uint16_t c = 0; c < pw; c++) dst[c] = src[c * 2];
+        else memcpy(dst, src, w * 2);
+    }
+    uint16_t suma = 0;
     for (size_t i = 0; i < nPix; i++) suma += tmp[i];
 
     uint8_t *o = buf + 14;
@@ -740,7 +759,7 @@ static size_t espejoArmarRle(EspejoSalida &s, uint8_t *buf, uint16_t *tmp, uint3
     }
     const uint16_t encLen = (uint16_t)(o - (buf + 14));
     memcpy(o, &suma, 2); o += 2;
-    buf[0] = 'L'; buf[1] = 'V'; buf[2] = 'R'; buf[3] = '1';
+    buf[0] = 'L'; buf[1] = 'V'; buf[2] = mitad ? 'Q' : 'R'; buf[3] = '1';
     const uint16_t hdr[5] = {(uint16_t)s.envX1, (uint16_t)s.envY, w, rows, encLen};
     memcpy(buf + 4, hdr, 10);
     s.envY += rows;
@@ -808,6 +827,10 @@ static bool espejoComando(EspejoSalida &s, char c) {
         s.ultimoM = millis();
         return true;
     }
+    if (c == 'H' || c == 'h') {   // Wi-Fi: H = rapido (mitad de resolucion), h = completo
+        if (&s == &espWifi) espWifiMitad = (c == 'H');
+        return true;
+    }
     if (c == 'F') {
         if (s.on) espejoMarcarTodo(s);
         return true;
@@ -846,6 +869,9 @@ static void espejoUsbUpdate() {
 // Un solo navegador a la vez (el ultimo que se conecta). La imagen va en mensajes binarios
 // (un paquete "LVR1" por mensaje); los comandos llegan como texto ("M", "F", "X2401601").
 static WiFiServer espWebServer(80);
+// DNS propio: todos los nombres → 192.168.4.1. Junto con las respuestas de "hay internet" (abajo),
+// el celular/tableta/Windows no abandonan la red PERLA-Ballena ni cortan la pagina por "sin internet".
+static DNSServer espDns;
 static WiFiServer espWsServer(81);
 static WiFiClient espWsCli;
 static bool espWifiListo = false;
@@ -870,16 +896,28 @@ void espejoWifiBegin() {
     WiFi.setSleep(false);   // sin ahorro de energia del Wi-Fi: menos retraso
     espWebServer.begin();
     espWsServer.begin();
+    espDns.start(53, "*", WiFi.softAPIP());
     espWifiListo = true;
     xTaskCreatePinnedToCore(espejoWifiTask, "espejoWifi", 8192, NULL, 1, NULL, 0);
     Serial.printf("[ESPEJO] Wi-Fi: red '%s' → abrir http://%s\n", ESPEJO_WIFI_SSID,
                   WiFi.softAPIP().toString().c_str());
 }
 
+static bool espWsAbierto = false;   // no usar espWsCli.connected(): a veces da "desconectado" sin estarlo
+
 static void espWsCerrar() {
-    if (espWsCli) espWsCli.stop();
+    if (espWsAbierto) espWsCli.stop();
+    espWsAbierto = false;
     espWsRxLen = 0;
     espejoApagar(espWifi);
+}
+
+// cierra y dice por que en el Serial (para encontrar cortes)
+static void espWsCerrarPor(const char *motivo, int err = 0) {
+    if (!espWsAbierto) return;
+    if (err) Serial.printf("[ESPEJO] Wi-Fi: se corto (%s, errno %d)\n", motivo, err);
+    else Serial.printf("[ESPEJO] Wi-Fi: se corto (%s)\n", motivo);
+    espWsCerrar();
 }
 
 // Lee la peticion HTTP (encabezados) con un tiempo maximo. Regresa false si no llego completa.
@@ -901,7 +939,19 @@ static void espWebAtender() {
     if (!c) return;
     String req;
     espLeerEncabezados(c, req, 300);
-    if (req.startsWith("GET / ") || req.startsWith("GET /index")) {
+    // Pruebas de "hay internet" de Android, Windows y Apple: contestar lo que esperan
+    if (req.indexOf("/generate_204") >= 0 || req.indexOf("/gen_204") >= 0) {
+        c.print("HTTP/1.1 204 No Content\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+    } else if (req.indexOf("/connecttest.txt") >= 0) {
+        c.print("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 22\r\nConnection: close\r\n\r\n"
+                "Microsoft Connect Test");
+    } else if (req.indexOf("/ncsi.txt") >= 0) {
+        c.print("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 14\r\nConnection: close\r\n\r\n"
+                "Microsoft NCSI");
+    } else if (req.indexOf("/hotspot-detect") >= 0 || req.indexOf("/success.txt") >= 0) {
+        c.print("HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: 68\r\nConnection: close\r\n\r\n"
+                "<HTML><HEAD><TITLE>Success</TITLE></HEAD><BODY>Success</BODY></HTML>");
+    } else if (req.startsWith("GET / ") || req.startsWith("GET /index")) {
         const size_t len = strlen_P(ESPEJO_HTML);
         c.printf("HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: %u\r\n"
                  "Cache-Control: no-store\r\nConnection: close\r\n\r\n", (unsigned)len);
@@ -934,12 +984,13 @@ static void espWsAceptar() {
     String acc = base64::encode(sha, 20);
     c.print("HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n"
             "Sec-WebSocket-Accept: " + acc + "\r\n\r\n");
-    if (espWsCli) espWsCerrar();   // solo un navegador: el nuevo reemplaza al anterior
+    if (espWsAbierto) espWsCerrarPor("se conecto otro navegador");   // solo uno: el nuevo reemplaza al anterior
     espWsCli = c;
+    espWsAbierto = true;
     espWsCli.setNoDelay(true);
     const int fd = espWsCli.fd();
     if (fd >= 0) {   // si la red se cae, no quedarse esperando para siempre
-        struct timeval tv = {2, 0};
+        struct timeval tv = {10, 0};
         lwip_setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
     }
     espWsRxLen = 0;
@@ -948,7 +999,17 @@ static void espWsAceptar() {
 
 // Mensajes del navegador (con mascara, como manda el estandar). Solo texto corto.
 static void espWsLeer() {
-    while (espWsCli.available() && espWsRxLen < sizeof(espWsRx)) espWsRx[espWsRxLen++] = espWsCli.read();
+    if (!espWsAbierto) return;
+    const int fd = espWsCli.fd();
+    if (fd < 0) { espWsCerrarPor("sin socket"); return; }
+    while (espWsRxLen < sizeof(espWsRx)) {
+        const int r = lwip_recv(fd, espWsRx + espWsRxLen, sizeof(espWsRx) - espWsRxLen, MSG_DONTWAIT);
+        if (r > 0) { espWsRxLen += r; continue; }
+        if (r == 0) { espWsCerrarPor("el navegador cerro la conexion"); return; }
+        if (errno == EAGAIN || errno == EWOULDBLOCK) break;   // no hay mas por ahora
+        espWsCerrarPor("error al leer", errno);
+        return;
+    }
     for (;;) {
         if (espWsRxLen < 2) return;
         const uint8_t op = espWsRx[0] & 0x0F;
@@ -958,13 +1019,13 @@ static void espWsLeer() {
             if (espWsRxLen < 4) return;
             len = ((size_t)espWsRx[2] << 8) | espWsRx[3];
             h = 4;
-        } else if (len == 127) { espWsCerrar(); return; }
+        } else if (len == 127) { espWsCerrarPor("mensaje invalido"); return; }
         if (mask) h += 4;
-        if (h + len > sizeof(espWsRx)) { espWsCerrar(); return; }   // mensaje demasiado grande
+        if (h + len > sizeof(espWsRx)) { espWsCerrarPor("mensaje demasiado grande"); return; }
         if (espWsRxLen < h + len) return;
         uint8_t *pl = espWsRx + h;
         if (mask) for (size_t i = 0; i < len; i++) pl[i] ^= espWsRx[h - 4 + (i & 3)];
-        if (op == 0x8) { espWsCerrar(); return; }                    // el navegador cerro
+        if (op == 0x8) { espWsCerrarPor("el navegador cerro"); return; }
         if (op == 0x1 || op == 0x2) for (size_t i = 0; i < len; i++) espejoComando(espWifi, (char)pl[i]);
         memmove(espWsRx, espWsRx + h + len, espWsRxLen - h - len);
         espWsRxLen -= h + len;
@@ -975,10 +1036,10 @@ static void espWsLeer() {
 // Entre paquete y paquete lee los comandos, para que los clics no esperen.
 static void espWsMandar() {
     const int fd = espWsCli.fd();
-    if (fd < 0) { espWsCerrar(); return; }
+    if (fd < 0) { espWsCerrarPor("sin socket"); return; }
     const uint32_t t0 = millis();
     while (espWifi.on && millis() - t0 < 100) {
-        const size_t n = espejoArmarRle(espWifi, espWsTx + 4, espWsTmp, ESPEJO_PKT_PIX_WIFI);
+        const size_t n = espejoArmarRle(espWifi, espWsTx + 4, espWsTmp, ESPEJO_PKT_PIX_WIFI, espWifiMitad);
         if (n == 0) return;
         espWsTx[0] = 0x82;            // mensaje binario completo
         espWsTx[1] = 126;
@@ -987,26 +1048,24 @@ static void espWsMandar() {
         size_t off = 0;
         while (off < n + 4) {
             const int w = lwip_send(fd, espWsTx + off, n + 4 - off, 0);
-            if (w <= 0) { espWsCerrar(); return; }
+            if (w <= 0) { espWsCerrarPor("no se pudo mandar (red muy lenta?)", errno); return; }
             off += w;
         }
         espWsLeer();
-        if (!espWsCli) return;
+        if (!espWsAbierto) return;
     }
 }
 
 static void espejoWifiTask(void *) {
     for (;;) {
+        espDns.processNextRequest();
         espWebAtender();
         espWsAceptar();
-        if (espWsCli) {
-            if (!espWsCli.connected()) {
-                espWsCerrar();
-            } else {
-                espWsLeer();
-                if (espWsCli && espWifi.on && millis() - espWifi.ultimoM > ESPEJO_TIMEOUT_MS) espWsCerrar();
-                if (espWsCli && espWifi.on) espWsMandar();
-            }
+        if (espWsAbierto) {
+            espWsLeer();
+            if (espWsAbierto && espWifi.on && millis() - espWifi.ultimoM > ESPEJO_TIMEOUT_WIFI_MS)
+                espWsCerrarPor("la pagina no mando 'M' en 10 s");
+            if (espWsAbierto && espWifi.on) espWsMandar();
         }
         vTaskDelay(espWifi.on ? 1 : pdMS_TO_TICKS(10));
     }

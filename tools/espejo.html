@@ -55,6 +55,7 @@
   <button id="btnCon" class="primary">Conectar</button>
   <span id="estado"><span id="punto"></span><span id="txtEstado">Sin conectar</span></span>
   <label><input type="checkbox" id="chkNitido" checked> Nítido</label>
+  <label id="lblRapido" title="Wi-Fi: manda la mitad de la resolucion (4 veces menos datos). Mas rapido, un poco menos nitido" style="display:none"><input type="checkbox" id="chkRapido" checked> Rápido</label>
   <label title="Hacer clic en la imagen = tocar la pantalla de la ballena"><input type="checkbox" id="chkTactil" checked> Clic = tocar</label>
   <label title="Tamaño x2, x3... exacto: cada pixel de la ballena = un cuadro igual"><input type="checkbox" id="chkEntero"> Escala exacta</label>
   <label><input type="checkbox" id="chkLog"> Serial</label>
@@ -102,6 +103,7 @@ const conectado = () => MODO_WIFI ? !!(ws && ws.readyState === 1) : !!port;
 let quiereConectado = false;
 let buf = new Uint8Array(1 << 20), len = 0;
 let dx1 = W, dy1 = H, dx2 = -1, dy2 = -1, pintar = false;
+let paquetesConexion = 0;   // desde la ultima conexion: "MF" solo hasta recibir la primera imagen
 let bytesRx = 0, paquetes = 0, malos = 0, ultimoPaquete = 0;
 const dec = new TextDecoder();
 let lineaTxt = "";
@@ -129,16 +131,17 @@ function texto(a, b) {
 
 function buscarMagia(i) {
   for (let k = i; k + 3 < len; k++) {
-    if (buf[k] === 0x4C && buf[k + 1] === 0x56 && (buf[k + 2] === 0x4D || buf[k + 2] === 0x52) && buf[k + 3] === 0x31)
-      return k;   // "LVM1" (sin comprimir) o "LVR1" (comprimido)
+    if (buf[k] === 0x4C && buf[k + 1] === 0x56 && (buf[k + 2] === 0x4D || buf[k + 2] === 0x52 || buf[k + 2] === 0x51) && buf[k + 3] === 0x31)
+      return k;   // "LVM1" (sin comprimir), "LVR1" (comprimido), "LVQ1" (comprimido, 1 pixel por 2x2)
   }
   return -1;
 }
 
 // "LVR1": byte n < 128 → siguen n+1 pixeles; n >= 128 → el siguiente pixel se repite n-126 veces
 const tmpPx = new Uint16Array(W * H);
-function descomprimir(p, encLen, x, y, w, h, sumaEsperada) {
-  const fin = p + encLen, total = w * h;
+function descomprimir(p, encLen, x, y, w, h, sumaEsperada, mitad) {
+  const pw = mitad ? w >> 1 : w, ph = mitad ? h >> 1 : h;
+  const fin = p + encLen, total = pw * ph;
   let cnt = 0, suma = 0;
   while (p < fin && cnt <= total) {
     const c = buf[p++];
@@ -151,6 +154,16 @@ function descomprimir(p, encLen, x, y, w, h, sumaEsperada) {
   }
   if (cnt !== total || suma !== sumaEsperada) return false;
   let k = 0;
+  if (mitad) {   // cada pixel recibido = cuadro de 2x2
+    for (let r = 0; r < ph; r++) {
+      let o = (y + r * 2) * W + x;
+      for (let c = 0; c < pw; c++, o += 2) {
+        const v = lut[tmpPx[k++]];
+        px32[o] = v; px32[o + 1] = v; px32[o + W] = v; px32[o + W + 1] = v;
+      }
+    }
+    return true;
+  }
   for (let r = 0; r < h; r++) {
     let o = (y + r) * W + x;
     for (let c = 0; c < w; c++) px32[o++] = lut[tmpPx[k++]];
@@ -169,17 +182,17 @@ function procesar() {
     const x = buf[m + 4] | (buf[m + 5] << 8), y = buf[m + 6] | (buf[m + 7] << 8);
     const w = buf[m + 8] | (buf[m + 9] << 8), h = buf[m + 10] | (buf[m + 11] << 8);
     if (w === 0 || h === 0 || x + w > W || y + h > H) { malos++; tirar = true; i = m + 4; continue; }
-    if (buf[m + 2] === 0x52) {   // "LVR1": comprimido
+    if (buf[m + 2] === 0x52 || buf[m + 2] === 0x51) {   // "LVR1" / "LVQ1": comprimido
       if (len - m < 14) { i = m; break; }
       const encLen = buf[m + 12] | (buf[m + 13] << 8);
       const n = 14 + encLen + 2;
       if (len - m < n) { i = m; break; }
-      if (!descomprimir(m + 14, encLen, x, y, w, h, buf[m + 14 + encLen] | (buf[m + 15 + encLen] << 8))) {
+      if (!descomprimir(m + 14, encLen, x, y, w, h, buf[m + 14 + encLen] | (buf[m + 15 + encLen] << 8), buf[m + 2] === 0x51)) {
         malos++; tirar = true; i = m + 4; continue;
       }
       if (x < dx1) dx1 = x; if (y < dy1) dy1 = y;
       if (x + w - 1 > dx2) dx2 = x + w - 1; if (y + h - 1 > dy2) dy2 = y + h - 1;
-      paquetes++; ultimoPaquete = performance.now();
+      paquetes++; paquetesConexion++; ultimoPaquete = performance.now();
       i = m + n;
       continue;
     }
@@ -195,7 +208,7 @@ function procesar() {
     }
     if (x < dx1) dx1 = x; if (y < dy1) dy1 = y;
     if (x + w - 1 > dx2) dx2 = x + w - 1; if (y + h - 1 > dy2) dy2 = y + h - 1;
-    paquetes++; ultimoPaquete = performance.now();
+    paquetes++; paquetesConexion++; ultimoPaquete = performance.now();
     i = m + n;
   }
   if (i > 0) { buf.copyWithin(0, i, len); len -= i; }
@@ -253,13 +266,13 @@ async function abrir(p) {
   quiereConectado = true;
   btnCon.textContent = "Desconectar"; btnCon.classList.remove("primary");
   estado("Conectado, esperando imagen…", "ok");
-  len = 0; lineaTxt = ""; conectadoEn = performance.now(); vioArranque = false;
+  len = 0; lineaTxt = ""; conectadoEn = performance.now(); vioArranque = false; paquetesConexion = 0;
   leyendo = leer(port);
   // Al abrir el puerto, Windows reinicia la pantalla: se manda "MF" cada segundo hasta que llega imagen,
   // y despues solo "M" ("sigo aqui").
   puedeEnviar = false;
   setTimeout(() => { if (!vioArranque) puedeEnviar = true; }, 2500);   // no se reinicio: ya se puede
-  keepTimer = setInterval(() => enviar(paquetes > 0 && performance.now() - ultimoPaquete < 3000 ? "M" : "MF"), 1000);
+  keepTimer = setInterval(() => enviar(paquetesConexion > 0 ? "M" : "MF"), 1000);
 }
 
 let leyendo = null, cerrando = false, conectadoEn = 0;
@@ -416,10 +429,10 @@ function conectarWifi() {
   ws.binaryType = "arraybuffer";
   ws.onopen = () => {
     conectadoEn = performance.now();
-    len = 0;
-    ws.send("MF");                                   // encender el espejo + mandar todo
+    len = 0; paquetesConexion = 0;
+    ws.send(($("chkRapido").checked ? "H" : "h") + "MF");   // modo + encender el espejo + mandar todo
     clearInterval(keepTimer);
-    keepTimer = setInterval(() => enviar(paquetes > 0 && performance.now() - ultimoPaquete < 3000 ? "M" : "MF"), 1000);
+    keepTimer = setInterval(() => enviar(paquetesConexion > 0 ? "M" : "MF"), 1000);
   };
   ws.onmessage = (ev) => { if (ev.data instanceof ArrayBuffer) agregar(new Uint8Array(ev.data)); };
   ws.onclose = () => {
@@ -432,6 +445,8 @@ function conectarWifi() {
 }
 if (MODO_WIFI) {
   btnCon.style.display = "none";
+  $("lblRapido").style.display = "";
+  $("chkRapido").onchange = (e) => enviar((e.target.checked ? "H" : "h") + "F");
   $("chkLog").parentElement.style.display = "none";   // los mensajes del Serial solo van por cable
   conectarWifi();
 }
