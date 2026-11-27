@@ -579,8 +579,65 @@ static void espejoApagar() {
 }
 
 // comandos de la pagina (llegan por emgSerialUpdate): M = encender / sigo aqui, m = apagar, F = todo otra vez
+// ---- Toque desde la computadora (clic en tools/espejo.html) ----
+// La pagina manda "X" + x (3 cifras) + y (3 cifras) + "1" (presionado) o "0" (suelto), p. ej. "X2401601".
+// Mientras se mantiene presionado lo repite cada 150 ms; sin repeticion en 400 ms se suelta solo
+// (por si se cierra la pagina con el boton presionado). Solo funciona con el espejo encendido.
+constexpr uint32_t ESPEJO_TOQUE_TIMEOUT_MS = 400;
+static bool remTouchPressed = false;
+static int16_t remTouchX = 0, remTouchY = 0;
+static uint32_t remTouchMs = 0;
+static uint32_t remMinHasta = 0;   // un clic rapido se mantiene al menos 80 ms (LVGL lee el toque cada 30 ms)
+static char remBuf[7];
+static uint8_t remLen = 0;
+static bool remLeyendo = false;
+static uint32_t remInicioMs = 0;
+
+static void remTouchParse() {
+    for (int i = 0; i < 6; i++) if (remBuf[i] < '0' || remBuf[i] > '9') return;
+    if (remBuf[6] != '0' && remBuf[6] != '1') return;
+    const int x = (remBuf[0] - '0') * 100 + (remBuf[1] - '0') * 10 + (remBuf[2] - '0');
+    const int y = (remBuf[3] - '0') * 100 + (remBuf[4] - '0') * 10 + (remBuf[5] - '0');
+    if (x >= screenWidth || y >= screenHeight || !espejoOn) return;
+    remTouchX = x;
+    remTouchY = y;
+    const bool pr = remBuf[6] == '1';
+    if (pr && !remTouchPressed) remMinHasta = millis() + 80;
+    remTouchPressed = pr;
+    remTouchMs = millis();
+}
+
+// lo usa my_touchpad_read: true = la computadora esta "tocando" la pantalla
+static bool remTouchActive(int16_t *x, int16_t *y) {
+    if (!espejoOn) return false;
+    const bool sostenido = remTouchPressed && millis() - remTouchMs <= ESPEJO_TOQUE_TIMEOUT_MS;
+    const bool clicCorto = (int32_t)(remMinHasta - millis()) > 0;
+    if (!sostenido && !clicCorto) return false;
+    *x = remTouchX;
+    *y = remTouchY;
+    return true;
+}
+
 bool mirrorSerialCommand(char c) {
     if (!ESPEJO_USB) return false;
+    if (remLeyendo) {
+        if (millis() - remInicioMs > 200) {
+            remLeyendo = false;   // mensaje incompleto: se descarta y este caracter se procesa normal
+        } else {
+            remBuf[remLen++] = c;
+            if (remLen == sizeof(remBuf)) {
+                remLeyendo = false;
+                remTouchParse();
+            }
+            return true;
+        }
+    }
+    if (c == 'X') {
+        remLeyendo = true;
+        remLen = 0;
+        remInicioMs = millis();
+        return true;
+    }
     if (c == 'M') {
         if (!espejoOn && espejoFb != NULL) {
             espejoOn = true;
@@ -670,8 +727,13 @@ void my_touchpad_read(lv_indev_drv_t *indev_driver, lv_indev_data_t *data)
 {
     uint16_t touchX, touchY;
     bool touched = tft.getTouch(&touchX, &touchY);
+    int16_t rx, ry;
 
-    if (!touched) {
+    if (!touched && remTouchActive(&rx, &ry)) {   // clic desde la computadora (espejo)
+        data->state = LV_INDEV_STATE_PR;
+        data->point.x = rx;
+        data->point.y = ry;
+    } else if (!touched) {
         data->state = LV_INDEV_STATE_REL;
     } else {
         data->state = LV_INDEV_STATE_PR;

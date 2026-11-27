@@ -37,6 +37,7 @@
   #zona { overflow: hidden; }
   canvas { background: #000; display: block; flex: none; border-radius: 2px; box-shadow: 0 0 0 1px var(--line); }
   canvas.nitido { image-rendering: pixelated; }
+  canvas.tactil { cursor: pointer; touch-action: none; }
   #log { width: 360px; display: none; flex-direction: column; border-left: 1px solid var(--line); background: var(--panel); }
   #log.visible { display: flex; }
   #log pre { flex: 1; margin: 0; padding: 10px; overflow: auto; font: 12px/1.35 ui-monospace, Consolas, monospace;
@@ -54,6 +55,7 @@
   <button id="btnCon" class="primary">Conectar</button>
   <span id="estado"><span id="punto"></span><span id="txtEstado">Sin conectar</span></span>
   <label><input type="checkbox" id="chkNitido" checked> Nítido</label>
+  <label title="Hacer clic en la imagen = tocar la pantalla de la ballena"><input type="checkbox" id="chkTactil" checked> Clic = tocar</label>
   <label title="Tamaño x2, x3... exacto: cada pixel de la ballena = un cuadro igual"><input type="checkbox" id="chkEntero"> Escala exacta</label>
   <label><input type="checkbox" id="chkLog"> Serial</label>
   <button id="btnFoto" title="Guardar la imagen como PNG">Captura</button>
@@ -287,6 +289,55 @@ function ajustar() {
 new ResizeObserver(ajustar).observe(zona);
 window.addEventListener("resize", ajustar);
 $("chkEntero").onchange = ajustar;
+
+// ---- Clic en la imagen = tocar la pantalla de la ballena ----
+// Manda "X" + x (3 cifras) + y (3 cifras) + "1"/"0". Mientras se mantiene presionado, se repite cada 150 ms.
+let tocando = false, ultimoToque = null, repetirToque = null, ultimoMovMs = 0;
+const pad3 = (n) => String(n).padStart(3, "0");
+function posToque(ev) {
+  const r = cv.getBoundingClientRect();
+  const x = Math.min(W - 1, Math.max(0, Math.floor((ev.clientX - r.left) / r.width * W)));
+  const y = Math.min(H - 1, Math.max(0, Math.floor((ev.clientY - r.top) / r.height * H)));
+  return [x, y];
+}
+function mandarToque(x, y, presionado) {
+  ultimoToque = [x, y];
+  enviar("X" + pad3(x) + pad3(y) + (presionado ? "1" : "0"));
+}
+function soltar(ev) {
+  if (!tocando) return;
+  tocando = false;
+  clearInterval(repetirToque); repetirToque = null;
+  if (ev && ev.type === "pointerup") {        // soltar en el punto final (no en el ultimo enviado)
+    const [x, y] = posToque(ev);
+    mandarToque(x, y, true);
+    mandarToque(x, y, false);
+  } else if (ultimoToque) mandarToque(ultimoToque[0], ultimoToque[1], false);
+}
+function tactilOn() { return $("chkTactil").checked && port && paquetes > 0; }
+cv.classList.toggle("tactil", $("chkTactil").checked);
+$("chkTactil").onchange = (e) => { cv.classList.toggle("tactil", e.target.checked); soltar(null); };
+cv.addEventListener("pointerdown", (ev) => {
+  if (!tactilOn() || ev.button !== 0) return;
+  ev.preventDefault();
+  cv.setPointerCapture(ev.pointerId);
+  tocando = true;
+  const [x, y] = posToque(ev);
+  mandarToque(x, y, true);
+  repetirToque = setInterval(() => { if (tocando && ultimoToque) mandarToque(ultimoToque[0], ultimoToque[1], true); }, 150);
+});
+cv.addEventListener("pointermove", (ev) => {
+  if (!tocando) return;
+  const ahora = performance.now();
+  if (ahora - ultimoMovMs < 30) return;   // como maximo ~30 por segundo (arrastrar sliders y el panel EMG)
+  ultimoMovMs = ahora;
+  const [x, y] = posToque(ev);
+  mandarToque(x, y, true);
+});
+cv.addEventListener("pointerup", soltar);
+cv.addEventListener("pointercancel", soltar);
+cv.addEventListener("lostpointercapture", soltar);
+window.addEventListener("blur", () => soltar(null));
 $("frmCmd").onsubmit = (e) => { e.preventDefault(); const c = $("cmd").value; if (c) { logTxt.textContent += "> " + c + "\n"; enviar(c + "\n"); } $("cmd").value = ""; };
 $("chkNitido").onchange = (e) => cv.classList.toggle("nitido", e.target.checked);
 $("chkLog").onchange = (e) => { logBox.classList.toggle("visible", e.target.checked); logTxt.scrollTop = logTxt.scrollHeight; ajustar(); };
